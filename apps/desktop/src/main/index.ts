@@ -430,9 +430,16 @@ async function initRuntime(win: BrowserWindow) {
     });
 
     // ── 初始化 MCP 连接（使用文档目录作为默认允许目录）──
+    // 使用 8 秒超时包裹 connect，避免 MCP SDK 内部的 60 秒默认超时阻塞 runtime 初始化
     const defaultMcpDir = app.getPath("documents");
+    const MCP_CONNECT_TIMEOUT_MS = 8000;
     try {
-      await mcpManager.connect([defaultMcpDir]);
+      await Promise.race([
+        mcpManager.connect([defaultMcpDir]),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`MCP connect timeout after ${MCP_CONNECT_TIMEOUT_MS}ms`)), MCP_CONNECT_TIMEOUT_MS)
+        ),
+      ]);
       win.webContents.send("icee:step-event", {
         type: "SYSTEM",
         message: `✅ MCP Filesystem Server connected (${defaultMcpDir})`,
@@ -816,9 +823,14 @@ async function initRuntime(win: BrowserWindow) {
         targetDir = result.filePaths[0]!;
       }
 
-      // 重新连接 MCP Server 到新目录
+      // 重新连接 MCP Server 到新目录（8秒超时）
       try {
-        await mcpManager.connect([targetDir]);
+        await Promise.race([
+          mcpManager.connect([targetDir]),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("MCP connect timeout after 8000ms")), 8000)
+          ),
+        ]);
         const tools = await mcpManager.refreshTools();
         win.webContents.send("icee:step-event", {
           type: "SYSTEM",

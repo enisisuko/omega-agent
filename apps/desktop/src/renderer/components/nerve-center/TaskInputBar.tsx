@@ -391,7 +391,7 @@ export function TaskInputBar({ orchestratorState, onSubmit, onStop, providers = 
                       opacity: hasContent ? 1 : 0.30,
                       background: hasContent
                         ? "rgba(96,165,250,0.18)"
-                        : "transparent",
+                        : "rgba(96,165,250,0)",
                     }}
                     transition={{ duration: 0.12 }}
                     style={{
