@@ -316,38 +316,69 @@ async function initRuntime(win: BrowserWindow) {
 
     registry.register(
       new LLMNodeExecutor(async (config, _input) => {
-        // 每次调用时从 globalProviderRef 读取最新实例（热重载后即刻生效）
-        if (!globalProviderRef.healthy) {
-          // Provider 不可用时降级为 mock
-          return {
-            text: `[Mock] ${globalProviderRef.model}: Provider not available. Check Settings > Providers.`,
-            tokens: 50,
-            costUsd: 0,
-            providerMeta: { provider: "mock", model: globalProviderRef.model },
-          };
+        // ── 每次 LLM 调用时，从 DB 实时读取最新的默认 Provider ──────────
+        // 这样用户在 Settings 里修改 Provider 后，无需重启即刻生效，
+        // 也不依赖 globalProviderRef 是否被正确热重载
+        let liveProvider = globalProviderRef.instance;
+        let liveModel = globalProviderRef.model;
+
+        try {
+          const liveDb = await ensureEarlyDb();
+          const liveRow = liveDb.instance.prepare(
+            "SELECT type, base_url, api_key, model FROM providers WHERE is_default = 1 LIMIT 1"
+          ).get() as { type: string; base_url: string; api_key?: string; model?: string } | undefined;
+
+          if (liveRow) {
+            liveModel = liveRow.model ?? (liveRow.type === "ollama" ? "llama3.2" : "gpt-4o-mini");
+            const liveUrl = liveRow.base_url;
+
+            console.log(`[ICEE LLM] Live provider from DB: type=${liveRow.type} url=${liveUrl} model=${liveModel}`);
+
+            // 如果 URL 或类型与 globalProviderRef 不同，新建一次性 provider 实例
+            if (liveUrl !== globalProviderRef.url || liveRow.type !== (globalProviderRef.instance?.constructor?.name ?? "")) {
+              if (liveRow.type === "openai-compatible" || liveRow.type === "lm-studio" || liveRow.type === "custom") {
+                liveProvider = new OpenAICompatibleProvider({
+                  baseUrl: liveUrl,
+                  ...(liveRow.api_key && { apiKey: liveRow.api_key }),
+                  ...(liveRow.model && { defaultModel: liveRow.model }),
+                });
+              } else {
+                liveProvider = new OllamaProvider({ baseUrl: liveUrl });
+              }
+              // 同步更新 globalProviderRef，供下次快速读取
+              globalProviderRef.instance = liveProvider;
+              globalProviderRef.model = liveModel;
+              globalProviderRef.url = liveUrl;
+              console.log(`[ICEE LLM] Provider instance updated to ${liveRow.type} @ ${liveUrl}`);
+            }
+          } else {
+            console.log(`[ICEE LLM] No default provider in DB, using cached: url=${globalProviderRef.url} model=${liveModel}`);
+          }
+        } catch (e) {
+          console.warn("[ICEE LLM] Failed to read live provider from DB, using cached:", e);
         }
 
-        // config.model 若为空/undefined，则 fallback 到 globalProviderRef.model（当前配置的模型）
-        // 注意：graphJson 中不再硬编码 model，此处 config.model 将为 undefined，全部走 fallback
-        const resolvedModel = (config.model && config.model.trim()) ? config.model : globalProviderRef.model;
+        if (!liveProvider) {
+          throw new Error("No LLM provider available. Please configure a provider in Settings.");
+        }
 
-        const result = await globalProviderRef.instance.generateComplete({
+        // config.model 若为空/undefined，则 fallback 到从 DB 读取的 liveModel
+        const resolvedModel = (config.model && config.model.trim()) ? config.model : liveModel;
+
+        console.log(`[ICEE LLM] Calling provider with model=${resolvedModel}`);
+
+        const result = await liveProvider.generateComplete({
           model: resolvedModel,
           messages: [
             {
               role: "system",
-              content:
-                config.systemPrompt ?? "You are a helpful assistant.",
+              content: config.systemPrompt ?? "You are a helpful assistant.",
             },
             { role: "user", content: config.promptTemplate ?? "" },
           ],
           stream: true,
-          ...(config.temperature !== undefined && {
-            temperature: config.temperature,
-          }),
-          ...(config.maxTokens !== undefined && {
-            maxTokens: config.maxTokens,
-          }),
+          ...(config.temperature !== undefined && { temperature: config.temperature }),
+          ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
         });
 
         // 实时推送 token 数量更新
