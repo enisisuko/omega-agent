@@ -222,6 +222,14 @@ function registerProviderHandlers() {
       return { error: (e as Error).message };
     }
   });
+
+  // ── IPC: list-mcp-tools（早期注册版本，runtime 未就绪时返回空列表）──
+  // renderer 在 Settings 页面挂载时就调用，必须提前注册；
+  // initRuntime 就绪后通过 removeHandler + re-register 覆盖为真实数据版本
+  ipcMain.handle("icee:list-mcp-tools", async () => {
+    // runtime 就绪前返回未连接状态
+    return { connected: false, allowedDir: "", tools: [] };
+  });
 }
 
 /**
@@ -668,7 +676,8 @@ async function initRuntime(win: BrowserWindow) {
     // 注：list-providers / save-provider / delete-provider / reload-provider
     // 已在 registerProviderHandlers() 中提前注册（app.whenReady 时），此处不再重复
 
-    // ── IPC: list-mcp-tools ────────────────────
+    // ── IPC: list-mcp-tools（runtime 就绪后覆盖早期注册的空实现）──────
+    ipcMain.removeHandler("icee:list-mcp-tools");
     ipcMain.handle("icee:list-mcp-tools", async () => {
       const tools = mcpManager.connected
         ? await mcpManager.refreshTools()
