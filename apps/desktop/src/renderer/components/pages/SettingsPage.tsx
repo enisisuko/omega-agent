@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { SettingsSection, ProviderConfig, PluginConfig } from "../../types/ui.js";
-import { mockProviders, mockPlugins } from "../../data/mockData.js";
+import { mockPlugins } from "../../data/mockData.js";
 import { useLanguage } from "../../i18n/LanguageContext.js";
 import type { Locale } from "../../i18n/translations.js";
 
@@ -14,53 +14,46 @@ type ExtendedSettingsSection = SettingsSection | "mcp";
  * 布局：左侧分组导航（160px）+ 右侧配置面板（flex-1）
  * 分组：Providers / Plugins / MCP / Appearance
  *
- * 新增功能（v0.1.6）：
- *   - Provider CRUD：添加/编辑/删除 Provider，含 API Key 输入（眼睛图标切换显示）
- *   - MCP 配置入口：显示 MCP Server 连接状态、文件系统根目录配置、可用工具列表
+ * v0.2.4 更新：providers 状态提升到 App.tsx 顶层，通过 props 传入，
+ * 避免 AnimatePresence 路由切换时组件卸载导致状态丢失。
  */
-export function SettingsPage() {
+export function SettingsPage({
+  providers,
+  onSaveProvider,
+  onDeleteProvider,
+}: {
+  providers: ProviderConfig[];
+  onSaveProvider: (config: ProviderConfig) => void;
+  onDeleteProvider: (id: string) => void;
+}) {
   const [activeSection, setActiveSection] = useState<ExtendedSettingsSection>("providers");
   const [plugins, setPlugins] = useState<PluginConfig[]>(mockPlugins);
-
-  // Provider 列表状态（初始化为 mock 数据，Electron 下会从 IPC 读取）
-  const [providers, setProviders] = useState<ProviderConfig[]>(mockProviders);
 
   // 编辑状态：null 表示新增，有值表示编辑某个 provider
   const [editingProvider, setEditingProvider] = useState<ProviderConfig | null>(null);
   const [showProviderForm, setShowProviderForm] = useState(false);
 
-  // MCP 状态
+  // MCP 状态（依然在本地管理，因为它不需要跨路由持久化）
   const [mcpConnected, setMcpConnected] = useState(false);
   const [mcpDir, setMcpDir] = useState("");
   const [mcpTools, setMcpTools] = useState<Array<{ name: string; description: string }>>([]);
 
-  // 从 Electron IPC 加载 Provider 列表和 MCP 工具列表
+  // 加载 MCP 工具列表（listMcpTools 返回单个 IceeMcpStatusResult 对象）
   useEffect(() => {
     const icee = window.icee as (typeof window.icee & {
-      listProviders?: () => Promise<ProviderConfig[]>;
-      listMcpTools?: () => Promise<Array<{ name: string; description: string; connected: boolean; allowedDir: string }>>;
+      listMcpTools?: () => Promise<{ connected: boolean; allowedDir: string; tools: Array<{ name: string; description: string }> }>;
     });
-    if (!icee) return;
+    if (!icee?.listMcpTools) return;
 
-    // 加载 Provider 列表
-    if (icee.listProviders) {
-      icee.listProviders().then((list) => {
-        if (list && list.length > 0) setProviders(list);
-      }).catch(console.error);
-    }
-
-    // 加载 MCP 工具列表（listMcpTools 返回单个 IceeMcpStatusResult 对象）
-    if (icee.listMcpTools) {
-      icee.listMcpTools().then((data) => {
-        if (data) {
-          setMcpConnected(data.connected ?? false);
-          setMcpDir(data.allowedDir ?? "");
-          if (Array.isArray(data.tools)) {
-            setMcpTools(data.tools.map(item => ({ name: item.name, description: item.description })));
-          }
+    icee.listMcpTools().then((data) => {
+      if (data) {
+        setMcpConnected(data.connected ?? false);
+        setMcpDir(data.allowedDir ?? "");
+        if (Array.isArray(data.tools)) {
+          setMcpTools(data.tools.map(item => ({ name: item.name, description: item.description })));
         }
-      }).catch(console.error);
-    }
+      }
+    }).catch(console.error);
   }, []);
 
   const togglePlugin = (id: string) => {
@@ -81,47 +74,17 @@ export function SettingsPage() {
     setShowProviderForm(true);
   };
 
-  /** 删除 Provider */
-  const handleDeleteProvider = (id: string) => {
-    const icee = window.icee as (typeof window.icee & { deleteProvider?: (id: string) => Promise<void> });
-    setProviders(prev => prev.filter(p => p.id !== id));
-    if (icee?.deleteProvider) {
-      icee.deleteProvider(id).catch(console.error);
-    }
-  };
-
-  /** 保存（新增/编辑）Provider，并触发主进程重载 Provider */
+  /** 内部保存处理：关闭抽屉，调用外部 onSaveProvider prop */
   const handleSaveProvider = (config: ProviderConfig) => {
-    // 先更新本地 UI 状态
-    setProviders(prev => {
-      const exists = prev.find(p => p.id === config.id);
-      if (exists) {
-        return prev.map(p => p.id === config.id ? config : p);
-      }
-      return [...prev, config];
-    });
     setShowProviderForm(false);
     setEditingProvider(null);
+    // providers 状态由 App.tsx 管理，这里只通知父组件
+    onSaveProvider(config);
+  };
 
-    if (!window.icee) return;
-
-    // 保存到 SQLite，再触发主进程热重载 Provider（关键！）
-    window.icee.saveProvider(config as IceeProviderConfig)
-      .then((result) => {
-        if (result?.error) {
-          console.error("[ICEE Settings] saveProvider error:", result.error);
-          return;
-        }
-        console.log("[ICEE Settings] Provider saved, reloading main process provider...");
-        // 主进程重新读取 DB 中的默认 Provider 并健康检查
-        return window.icee?.reloadProvider();
-      })
-      .then((reloadResult) => {
-        if (reloadResult) {
-          console.log(`[ICEE Settings] Provider reloaded: healthy=${reloadResult.healthy} url=${reloadResult.url}`);
-        }
-      })
-      .catch(console.error);
+  /** 内部删除处理：直接调用外部 onDeleteProvider prop */
+  const handleDeleteProvider = (id: string) => {
+    onDeleteProvider(id);
   };
 
   /** 设置 MCP 文件系统根目录 */

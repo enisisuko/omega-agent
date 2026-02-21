@@ -12,6 +12,7 @@ import {
   mockMcpTools,
   mockSkills,
   mockSessions,
+  mockProviders,
 } from "./data/mockData.js";
 import type {
   SidebarRoute,
@@ -25,6 +26,7 @@ import type {
   ExecutionRound,
   NodeStepRecord,
   McpToolData,
+  ProviderConfig,
 } from "./types/ui.js";
 
 /** 生成唯一 Session / Run ID */
@@ -120,6 +122,10 @@ export function App() {
 
   // ── Ollama 连接状态（Sidebar 呼吸灯数据源）─────────────────────
   const [ollamaConnected, setOllamaConnected] = useState(false);
+
+  // ── Provider 配置（提升到 App 层，防止 SettingsPage 卸载后状态丢失）────
+  // 初始为空数组，Electron 下通过 IPC 拉取真实数据；浏览器 dev 模式 fallback mockProviders
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
 
   // ── IPC 桥接（Electron 环境下激活，浏览器 dev 静默跳过）────────
   const { isElectron, runGraph, cancelRun } = useIceeRuntime({
@@ -334,7 +340,7 @@ export function App() {
     if (!isElectron || !window.icee) return;
     window.icee.listMcpTools().then((result) => {
       // 将 IceMcpToolInfo[] 映射为 McpToolData[]
-      const mapped: McpToolData[] = (result.tools ?? []).map((tool) => ({
+      const mapped: McpToolData[] = (result.tools ?? []).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({
         id: tool.name,       // 以工具名作为唯一 ID
         name: tool.name,
         description: tool.description,
@@ -347,6 +353,58 @@ export function App() {
       console.warn("[ICEE] listMcpTools failed:", e);
     });
   }, [isElectron]);
+
+  // 启动时通过 IPC 拉取 Provider 配置（仅 Electron 环境）
+  // 注意：放在 App 层而非 SettingsPage，防止路由切换时状态丢失
+  useEffect(() => {
+    if (isElectron && window.icee?.listProviders) {
+      window.icee.listProviders()
+        .then((list) => {
+          // 无论 list 是否为空都设置（不 fallback mock，让用户看到真实状态）
+          setProviders(list ?? []);
+          console.log(`[ICEE] Loaded ${(list ?? []).length} providers from DB`);
+        })
+        .catch((e: unknown) => {
+          console.warn("[ICEE] listProviders failed:", e);
+          setProviders(mockProviders); // 失败时 fallback mock
+        });
+    } else {
+      // 浏览器 dev 模式 fallback
+      setProviders(mockProviders);
+    }
+  }, [isElectron]);
+
+  /** 保存 Provider（乐观更新 state，再持久化到 DB + 通知主进程热重载）*/
+  const handleSaveProvider = useCallback((config: ProviderConfig) => {
+    // 1. 乐观更新本地 state（新增或更新）
+    setProviders((prev) => {
+      const exists = prev.find((p) => p.id === config.id);
+      return exists
+        ? prev.map((p) => (p.id === config.id ? config : p))
+        : [...prev, config];
+    });
+    // 2. 写入 DB 并热重载 provider
+    if (!window.icee) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    window.icee.saveProvider(config as any)
+      .then((result: { error?: string } | null) => {
+        if (result?.error) {
+          console.error("[ICEE] saveProvider error:", result.error);
+          return;
+        }
+        console.log("[ICEE] Provider saved, reloading...");
+        return window.icee?.reloadProvider();
+      })
+      .catch((e: unknown) => console.error("[ICEE] saveProvider failed:", e));
+  }, []);
+
+  /** 删除 Provider（乐观更新 state，再从 DB 删除）*/
+  const handleDeleteProvider = useCallback((id: string) => {
+    setProviders((prev) => prev.filter((p) => p.id !== id));
+    window.icee?.deleteProvider(id).catch((e: unknown) =>
+      console.error("[ICEE] deleteProvider failed:", e)
+    );
+  }, []);
 
   /** 新建空白会话，插到列表头部并激活 */
   const handleNewChat = useCallback(() => {
@@ -986,7 +1044,13 @@ export function App() {
             {activeRoute === "artifacts" && (
               <ArtifactsPage runHistory={runHistory} />
             )}
-            {activeRoute === "settings" && <SettingsPage />}
+            {activeRoute === "settings" && (
+              <SettingsPage
+                providers={providers}
+                onSaveProvider={handleSaveProvider}
+                onDeleteProvider={handleDeleteProvider}
+              />
+            )}
           </motion.div>
         </AnimatePresence>
       </div>
