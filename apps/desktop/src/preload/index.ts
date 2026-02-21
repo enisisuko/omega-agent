@@ -83,6 +83,16 @@ contextBridge.exposeInMainWorld("icee", {
     ipcRenderer.invoke("icee:cancel-run", runId),
 
   /**
+   * Fork 一个 Run：从指定 Step 开始重新执行
+   * @param parentRunId    原始 Run ID（用于查找历史步骤）
+   * @param fromStepId     从哪个 Step 开始重跑（该步骤之前的步骤标记为 inherited）
+   * @param graphJson      Graph 定义的 JSON 字符串
+   * @param inputOverrideJson  覆盖的输入（如编辑后的 Prompt），JSON 字符串，可选
+   */
+  forkRun: (parentRunId: string, fromStepId: string, graphJson: string, inputOverrideJson?: string) =>
+    ipcRenderer.invoke("icee:fork-run", parentRunId, fromStepId, graphJson, inputOverrideJson),
+
+  /**
    * 列出历史 Run 记录（最近 20 条）
    */
   listRuns: () =>

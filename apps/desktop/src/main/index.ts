@@ -385,6 +385,42 @@ async function initRuntime(win: BrowserWindow) {
       return { ok: true };
     });
 
+    // ── IPC: fork-run ──────────────────────────
+    // 从指定 Step 开始重新执行（用于节点 Rerun 功能）
+    // parentRunId: 原始 Run ID；fromStepId: 从哪个步骤开始；
+    // graphJson: 图定义；inputOverrideJson: 覆盖的输入（含编辑后 Prompt）
+    ipcMain.handle(
+      "icee:fork-run",
+      async (_event, parentRunId: string, fromStepId: string, graphJson: string, inputOverrideJson?: string) => {
+        try {
+          const { GraphDefinitionSchema } = await import("@icee/shared");
+
+          let graph;
+          try {
+            graph = GraphDefinitionSchema.parse(JSON.parse(graphJson));
+          } catch (e) {
+            return { ok: false, error: `Invalid graph: ${(e as Error).message}` };
+          }
+
+          let inputOverride: Record<string, unknown> | undefined;
+          if (inputOverrideJson) {
+            try {
+              inputOverride = JSON.parse(inputOverrideJson) as Record<string, unknown>;
+            } catch {
+              return { ok: false, error: "Invalid inputOverride JSON" };
+            }
+          }
+
+          const newRunId = await runtime.forkRun(parentRunId, fromStepId, graph, inputOverride);
+          console.log(`[ICEE Main] fork-run: parent=${parentRunId} fromStep=${fromStepId} newRun=${newRunId}`);
+          return { ok: true, newRunId };
+        } catch (e) {
+          console.error("[ICEE Main] fork-run error:", e);
+          return { ok: false, error: (e as Error).message };
+        }
+      }
+    );
+
     // ── IPC: list-runs ─────────────────────────
     ipcMain.handle("icee:list-runs", async () => {
       const runs = runRepo.findAll(20);

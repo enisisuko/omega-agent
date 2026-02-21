@@ -153,9 +153,14 @@ export interface ConversationSession {
    * - 提交任务时从 graphJson.edges 解析，初始全为 pending
    * - 每当 onStepEvent 到达时，target===nodeId 的边变为 active
    * - onRunCompleted 时所有 active 变为 completed（或 failed）
-   * - 为空时 NerveCenter 显示 mockSubagents 兼容视图
+   * - 为空时 NerveCenter 显示空画布引导提示
    */
   executionEdges: ExecutionEdge[];
+  /**
+   * 本次 Run 所用的 Graph JSON 字符串（用于 forkRun 重跑时传回 main process）
+   * 提交任务时写入，供 handleNodeRerun 使用
+   */
+  graphJson?: string;
 }
 
 // ─────────────────────────────────────────────

@@ -153,7 +153,12 @@ export function NerveCenter({
   const dynamicNodes = useDynamicGraph ? edgesToNodes(executionEdges, subagents) : [];
 
   // ── 静态模式兼容：subagents 直接渲染（旧逻辑） ───────────────
+  // 注：新建会话 subagents=[]，不再 fallback 到 mockSubagents，NerveCenter 显示空画布引导
   const staticSubagents = useDynamicGraph ? [] : subagents;
+
+  // ── 是否显示空画布引导提示 ───────────────────────────────────
+  // 新建会话：没有 executionEdges 且没有 subagents 时显示
+  const isEmptyCanvas = !useDynamicGraph && staticSubagents.length === 0;
 
   return (
     <div className="flex flex-col items-center justify-between h-full px-8 py-6 gap-4 relative">
@@ -175,7 +180,7 @@ export function NerveCenter({
       <div
         className="flex-1 w-full relative"
         ref={containerRef}
-        style={{ minHeight: useDynamicGraph ? Math.max(canvasHeight, 200) : 160 }}
+        style={{ minHeight: useDynamicGraph ? Math.max(canvasHeight, 200) : isEmptyCanvas ? 200 : 160 }}
       >
         {/* ════════════════════════════════
             动态图模式（executionEdges 驱动）
@@ -268,6 +273,34 @@ export function NerveCenter({
               </div>
             )}
           </>
+        )}
+
+        {/* ════════════════════════════════
+            空画布引导提示（新建会话无任务时）
+            ════════════════════════════════ */}
+        {isEmptyCanvas && (
+          <motion.div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-4"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.2 }}
+          >
+            {/* 脉冲圆点 */}
+            <motion.div
+              className="w-3 h-3 rounded-full"
+              style={{ background: "rgba(96,165,250,0.25)", boxShadow: "0 0 12px rgba(96,165,250,0.2)" }}
+              animate={{ scale: [1, 1.4, 1], opacity: [0.3, 0.7, 0.3] }}
+              transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+            />
+            {/* 主引导文字 */}
+            <p className="text-sm text-center" style={{ color: "rgba(255,255,255,0.22)", maxWidth: 240, lineHeight: 1.7 }}>
+              Submit a task above to begin
+            </p>
+            {/* 副文字 */}
+            <p className="text-xs text-center" style={{ color: "rgba(255,255,255,0.10)", maxWidth: 260 }}>
+              The execution graph will grow step-by-step as the agent works
+            </p>
+          </motion.div>
         )}
 
         {/* ════════════════════════════════

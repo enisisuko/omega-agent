@@ -67,6 +67,16 @@ interface IceeApi {
   runGraph(graphJson: string, inputJson: string, attachmentsJson?: string): Promise<IceeRunGraphResult>;
   /** 取消正在运行的 Run */
   cancelRun(runId: string): Promise<{ ok: boolean }>;
+  /**
+   * Fork 一个 Run：从指定 Step 开始重新执行，支持覆盖 input（Prompt 编辑）
+   * 返回新的 newRunId，可用于后续跟踪
+   */
+  forkRun(
+    parentRunId: string,
+    fromStepId: string,
+    graphJson: string,
+    inputOverrideJson?: string,
+  ): Promise<{ ok: boolean; newRunId?: string; error?: string }>;
   /** 列出历史 Run 记录 */
   listRuns(): Promise<unknown[]>;
 

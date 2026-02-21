@@ -23,6 +23,7 @@ import type {
   SubagentNode,
   ExecutionEdge,
   NodeStepRecord,
+  McpToolData,
 } from "./types/ui.js";
 
 /** 生成唯一 Session / Run ID */
@@ -112,6 +113,9 @@ export function App() {
 
   // ── Run 历史列表（Artifacts 页面数据源）────────────────────────
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
+
+  // ── 真实 MCP 工具数据（Electron 下从主进程拉取；浏览器 dev fallback mockMcpTools）─────
+  const [mcpToolsData, setMcpToolsData] = useState<McpToolData[]>([]);
 
   // ── Ollama 连接状态（Sidebar 呼吸灯数据源）─────────────────────
   const [ollamaConnected, setOllamaConnected] = useState(false);
@@ -300,6 +304,25 @@ export function App() {
     });
   }, [isElectron]);
 
+  // 启动时通过 IPC 拉取真实 MCP 工具列表（仅 Electron 环境）
+  useEffect(() => {
+    if (!isElectron || !window.icee) return;
+    window.icee.listMcpTools().then((result) => {
+      // 将 IceMcpToolInfo[] 映射为 McpToolData[]
+      const mapped: McpToolData[] = (result.tools ?? []).map((tool) => ({
+        id: tool.name,       // 以工具名作为唯一 ID
+        name: tool.name,
+        description: tool.description,
+        status: result.connected ? ("available" as const) : ("offline" as const),
+        type: "mcp" as const,
+      }));
+      setMcpToolsData(mapped);
+      console.log(`[ICEE] Loaded ${mapped.length} MCP tools (connected=${result.connected})`);
+    }).catch((e: unknown) => {
+      console.warn("[ICEE] listMcpTools failed:", e);
+    });
+  }, [isElectron]);
+
   /** 新建空白会话，插到列表头部并激活 */
   const handleNewChat = useCallback(() => {
     const blank = createBlankSession();
@@ -390,6 +413,8 @@ export function App() {
             executionEdges: initialEdges,
             // 清空旧的 subagents，让动态图从零开始生长
             subagents: [],
+            // 保存 graphJson 供 forkRun（重跑）使用
+            graphJson,
           };
         })
       );
@@ -757,7 +782,69 @@ export function App() {
         );
       }, 1500);
     }
-    // TODO Electron：调用 IPC 真实重跑指定节点
+    // ── Electron 环境：调用真实 forkRun IPC ──────────────────────
+    if (isElectron && window.icee?.forkRun) {
+      // 获取当前 session 的 runId 和 graphJson
+      setSessions((prev) => {
+        const session = prev.find((s) => s.id === activeSessionId);
+        if (!session) return prev;
+
+        const parentRunId = session.orchestrator.runId ?? "";
+        const currentGraphJson = session.graphJson ?? "{}";
+        // 构造覆盖输入（将编辑后的 prompt 作为 query）
+        const inputOverrideJson = JSON.stringify({ query: editedPrompt });
+
+        // 异步调用 forkRun，然后更新 session 状态
+        window.icee!.forkRun(parentRunId, stepId, currentGraphJson, inputOverrideJson)
+          .then((result) => {
+            console.log("[ICEE] forkRun result:", result);
+            if (result.ok && result.newRunId) {
+              // 更新 session 的 runId 为新 fork 出来的 runId
+              setSessions((innerPrev) =>
+                innerPrev.map((s) => {
+                  if (s.id !== activeSessionId) return s;
+                  return {
+                    ...s,
+                    orchestrator: {
+                      ...s.orchestrator,
+                      runId: result.newRunId!,
+                      state: "running" as const,
+                    },
+                  };
+                })
+              );
+            } else if (result.error) {
+              // forkRun 出错，将节点改为 error 状态
+              console.error("[ICEE] forkRun error:", result.error);
+              setSessions((innerPrev) =>
+                innerPrev.map((s) => {
+                  if (s.id !== activeSessionId) return s;
+                  return {
+                    ...s,
+                    subagents: s.subagents.map((node) => {
+                      if (node.id !== nodeId) return node;
+                      return {
+                        ...node,
+                        state: { status: "error" as const, errorMsg: result.error },
+                        steps: (node.steps ?? []).map((step) =>
+                          step.id === newStepId
+                            ? { ...step, status: "error" as const, errorMsg: result.error }
+                            : step
+                        ),
+                      };
+                    }),
+                  };
+                })
+              );
+            }
+          })
+          .catch((err: unknown) => {
+            console.error("[ICEE] forkRun IPC failed:", err);
+          });
+
+        return prev; // 不修改，由上面的异步 setSessions 处理
+      });
+    }
   }, [activeSessionId, isElectron]);
 
   /** 停止当前 Run */
@@ -840,12 +927,11 @@ export function App() {
                 >
                   <NerveCenter
                     orchestrator={orchestrator}
-                    subagents={
-                      currentSession.subagents.length > 0
-                        ? currentSession.subagents
-                        : mockSubagents
+                    subagents={currentSession.subagents}
+                    mcpTools={
+                      // Electron 下用真实 MCP 数据；浏览器 dev 模式 fallback mockMcpTools
+                      mcpToolsData.length > 0 ? mcpToolsData : mockMcpTools
                     }
-                    mcpTools={mockMcpTools}
                     skills={mockSkills}
                     {...(currentSession.aiOutput !== undefined && { aiOutput: currentSession.aiOutput })}
                     executionEdges={currentSession.executionEdges}
