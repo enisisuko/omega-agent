@@ -60,7 +60,7 @@ export class IceeDatabase {
   /**
    * providers 表列迁移 (v0.1.1)
    * 早期 schema 缺少 api_key 和 model 列，补充后 save-provider handler 才能正常工作
-   * ALTER TABLE ADD COLUMN 在列已存在时会报错，使用 try/catch 忽略
+   * ALTER TABLE ADD COLUMN 在列已存在时会抛 "duplicate column name" 错误，catch 区分处理
    */
   private migrateProviders(): void {
     const migrations = [
@@ -70,9 +70,16 @@ export class IceeDatabase {
     for (const m of migrations) {
       try {
         this.db.exec(m.sql);
-        console.log(`[IceeDatabase] Migration: added providers.${m.col}`);
-      } catch {
-        // 列已存在（SQLite 错误码 1/SQLITE_ERROR "duplicate column name"），静默跳过
+        console.log(`[IceeDatabase] Migration applied: providers.${m.col} column added`);
+      } catch (e) {
+        const msg = (e as Error).message ?? "";
+        if (msg.includes("duplicate column")) {
+          // 列已存在，正常情况，静默跳过（不记录 warn，避免日志噪音）
+          console.log(`[IceeDatabase] Migration skipped (already exists): providers.${m.col}`);
+        } else {
+          // 真正的迁移失败（磁盘满、权限问题等），记录完整错误
+          console.error(`[IceeDatabase] Migration FAILED for providers.${m.col}:`, e);
+        }
       }
     }
   }

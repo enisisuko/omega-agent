@@ -390,6 +390,23 @@ export function App() {
       .then((result: { error?: string } | null) => {
         if (result?.error) {
           console.error("[ICEE] saveProvider error:", result.error);
+          // 将保存失败错误写入当前 session 的 trace log，让用户在 UI 看到
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id !== activeSessionId ? s : {
+                ...s,
+                traceLogs: [
+                  ...s.traceLogs,
+                  {
+                    id: `save-err-${Date.now()}`,
+                    type: "SYSTEM" as const,
+                    timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+                    message: `⚠️ Provider save failed: ${result.error}`,
+                  },
+                ],
+              }
+            )
+          );
           return;
         }
         console.log("[ICEE] Provider saved, reloading...");

@@ -44,12 +44,40 @@ const earlyDbRef: { db: any | null } = { db: null };
 /**
  * 确保 DB 已初始化（幂等）
  * 在 provider IPC handler 调用时按需打开，供 initRuntime 内共享同一单例
+ *
+ * 每次首次打开后，立即强制执行 providers 表列迁移：
+ * 旧版 DB 文件可能缺少 api_key / model 列，ALTER TABLE 是幂等的（列已存在时 catch 忽略）。
+ * 这是修复 save-provider INSERT 因列不存在而静默失败的关键。
  */
 async function ensureEarlyDb(): Promise</* IceeDatabase */ { instance: any }> { // eslint-disable-line @typescript-eslint/no-explicit-any
   if (earlyDbRef.db) return earlyDbRef.db;
   const { getDatabase } = await import("@icee/db");
   const dbPath = path.join(app.getPath("userData"), "icee.db");
+  console.log(`[ICEE DB] Opening database at: ${dbPath}`);
   earlyDbRef.db = getDatabase(dbPath);
+
+  // ── 强制列迁移：确保 api_key 和 model 列存在 ───────────────────
+  // 无论 DB 是新建还是旧文件，都执行一次 ALTER TABLE。
+  // 列已存在时 SQLite 会抛 "duplicate column name" 错误，catch 忽略即可。
+  const migrations = [
+    { col: "api_key", sql: "ALTER TABLE providers ADD COLUMN api_key TEXT" },
+    { col: "model",   sql: "ALTER TABLE providers ADD COLUMN model TEXT" },
+  ];
+  for (const m of migrations) {
+    try {
+      earlyDbRef.db.instance.exec(m.sql);
+      console.log(`[ICEE DB] Migration applied: providers.${m.col} column added`);
+    } catch (e) {
+      const msg = (e as Error).message ?? "";
+      if (msg.includes("duplicate column")) {
+        console.log(`[ICEE DB] Migration skipped (column already exists): providers.${m.col}`);
+      } else {
+        // 真正的迁移失败（权限问题、磁盘满等），打印完整错误
+        console.error(`[ICEE DB] Migration FAILED for providers.${m.col}:`, e);
+      }
+    }
+  }
+
   return earlyDbRef.db;
 }
 
