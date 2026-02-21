@@ -7,7 +7,7 @@ import type {
   McpToolData, SkillData, TraceLogEntry,
   RunHistoryItem, ArtifactItem,
   ProviderConfig, PluginConfig,
-  ConversationSession, ExecutionEdge,
+  ConversationSession, ExecutionEdge, NodeStepRecord,
 } from "../types/ui.js";
 
 export const mockOrchestrator: OrchestratorData = {
@@ -235,7 +235,74 @@ const docQaEdges: ExecutionEdge[] = [
   { id: "dq-e3", source: "formatter", target: "output", state: "completed" },
 ];
 
-/** 竞品分析 session 对应的 subagent 节点（用于展示历史会话图） */
+// ── Mock NodeStepRecords（各节点历史步骤，用于展开面板演示） ──────
+const searchSteps: NodeStepRecord[] = [
+  {
+    id: "search-s1",
+    index: 1,
+    status: "success",
+    startedAt: "2026-02-21T08:30:13Z",
+    durationMs: 3100,
+    input: '{"query": "AI productivity tools pricing 2025", "limit": 20}',
+    output: "Found 12 results: Linear ($8), Notion ($10), ClickUp ($7), Asana ($13.49), Monday.com ($9)...",
+    tokens: 320,
+  },
+];
+
+const analyzeSteps: NodeStepRecord[] = [
+  {
+    id: "analyze-s1",
+    index: 1,
+    status: "success",
+    startedAt: "2026-02-21T08:30:18Z",
+    durationMs: 89400,
+    prompt: "You are a competitive analysis expert. Analyze the following search results and extract key pricing patterns, strengths, and weaknesses for each competitor.\n\nSearch results:\n{{search.output}}\n\nProvide a structured analysis.",
+    input: "Found 12 results: Linear ($8), Notion ($10)...",
+    output: "Pricing patterns extracted:\n1. Linear: $8/user/mo — keyboard-first UX\n2. Notion: $10/user/mo — flexible but complex\n3. Convergence around $8-13/user/month for pro tiers",
+    tokens: 8420,
+  },
+];
+
+const dataAgentSteps: NodeStepRecord[] = [
+  {
+    id: "data-s1",
+    index: 1,
+    status: "error",
+    startedAt: "2026-02-21T08:30:18Z",
+    durationMs: 2200,
+    prompt: "Fetch detailed pricing page for Notion AI and extract structured data.",
+    input: "Target: Notion pricing page",
+    errorMsg: "429 Rate Limited by web_search after 3 retries",
+  },
+  {
+    id: "data-s2",
+    index: 2,
+    status: "success",
+    startedAt: "2026-02-21T08:30:23Z",
+    durationMs: 3800,
+    prompt: "Fetch detailed pricing page for Notion AI and extract structured data. Use alternative search terms to avoid rate limiting.",
+    input: "Target: Notion pricing page (retry with backoff)",
+    output: '{"name":"Notion","price_per_user":10,"tier":"Plus","billing":"monthly","ai_addon":8}',
+    tokens: 1580,
+    isRerun: true,
+  },
+];
+
+const writerSteps: NodeStepRecord[] = [
+  {
+    id: "writer-s1",
+    index: 1,
+    status: "success",
+    startedAt: "2026-02-21T08:30:28Z",
+    durationMs: 98700,
+    prompt: "Write a comprehensive competitor analysis report based on the following data.\n\nAnalysis data:\n{{analyze.output}}\n\nPricing data:\n{{dataAgent.output}}\n\nFormat as a professional markdown report with executive summary, competitor comparison table, and strategic recommendations.",
+    input: "Pricing patterns + structured data from 5 competitors",
+    output: "# Competitor Analysis Report\n\n## Executive Summary\nThe AI productivity tools market is consolidating around $8-13/user/month pricing...\n\n[1,240 words total]",
+    tokens: 14200,
+  },
+];
+
+/** 竞品分析 session 对应的 subagent 节点（含完整步骤历史，供展开面板演示） */
 const competitorSubagents: SubagentNode[] = [
   {
     id: "search",
@@ -243,6 +310,7 @@ const competitorSubagents: SubagentNode[] = [
     type: "TOOL",
     pipeConnected: true,
     state: { status: "success", output: "Found 12 competitors", tokens: 320 },
+    steps: searchSteps,
   },
   {
     id: "analyze",
@@ -250,6 +318,7 @@ const competitorSubagents: SubagentNode[] = [
     type: "LLM",
     pipeConnected: true,
     state: { status: "success", output: "Pricing patterns extracted", tokens: 8420 },
+    steps: analyzeSteps,
   },
   {
     id: "dataAgent",
@@ -257,6 +326,7 @@ const competitorSubagents: SubagentNode[] = [
     type: "LLM",
     pipeConnected: true,
     state: { status: "success", output: "Retry succeeded after rate limit", tokens: 1580 },
+    steps: dataAgentSteps,
   },
   {
     id: "writer",
@@ -264,6 +334,7 @@ const competitorSubagents: SubagentNode[] = [
     type: "LLM",
     pipeConnected: true,
     state: { status: "success", output: "Report generated (1,240 words)", tokens: 14200 },
+    steps: writerSteps,
   },
   {
     id: "output",

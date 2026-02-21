@@ -32,6 +32,10 @@ interface NerveCenterProps {
   onTaskSubmit?: (task: string, attachments: AttachmentItem[]) => void;
   /** 停止当前 Run 的回调 */
   onStop?: () => void;
+  /** 节点步骤撤回回调（从 App.tsx 传入） */
+  onNodeRevert?: (nodeId: string, stepId: string) => void;
+  /** 节点重新生成回调（从 App.tsx 传入） */
+  onNodeRerun?: (nodeId: string, stepId: string, editedPrompt: string) => void;
 }
 
 /**
@@ -130,6 +134,8 @@ export function NerveCenter({
   executionEdges = [],
   onTaskSubmit,
   onStop,
+  onNodeRevert,
+  onNodeRerun,
 }: NerveCenterProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -215,13 +221,17 @@ export function NerveCenter({
                   <motion.div
                     key={node.id}
                     className="absolute"
-                    style={{ left, top, width: 192 }}
+                    style={{ left, top, width: 192, zIndex: 10 }}
                     initial={{ opacity: 0, scale: 0.85, y: 8 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.85 }}
                     transition={{ duration: 0.35, ease: [0.23, 1, 0.32, 1] }}
                   >
-                    <SubagentCard node={node} />
+                    <SubagentCard
+                      node={node}
+                      {...(onNodeRevert !== undefined && { onRevert: onNodeRevert })}
+                      {...(onNodeRerun !== undefined && { onRerun: onNodeRerun })}
+                    />
                   </motion.div>
                 );
               })}
@@ -313,7 +323,12 @@ export function NerveCenter({
             {/* 旧版卡片行 */}
             <div className="flex items-center gap-4 flex-wrap justify-center relative z-10 h-full">
               {staticSubagents.map((agent) => (
-                <SubagentCard key={agent.id} node={agent} />
+                <SubagentCard
+                  key={agent.id}
+                  node={agent}
+                  {...(onNodeRevert !== undefined && { onRevert: onNodeRevert })}
+                  {...(onNodeRerun !== undefined && { onRerun: onNodeRerun })}
+                />
               ))}
             </div>
           </>

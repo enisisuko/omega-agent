@@ -22,6 +22,7 @@ import type {
   RunHistoryItem,
   SubagentNode,
   ExecutionEdge,
+  NodeStepRecord,
 } from "./types/ui.js";
 
 /** 生成唯一 Session / Run ID */
@@ -480,14 +481,25 @@ export function App() {
                 return edge;
               });
 
-              // 更新或添加 subagent 节点
+              // 更新或添加 subagent 节点（同时追加 step 记录）
               const existingIdx = s.subagents.findIndex((n) => n.id === nodeId);
+              const existingNode = existingIdx >= 0 ? s.subagents[existingIdx] : null;
+              const existingSteps = existingNode?.steps ?? [];
+              const newStepRecord: NodeStepRecord = {
+                id: `mock-step-${nodeId}-${Date.now()}`,
+                index: existingSteps.length + 1,
+                status: "running",
+                startedAt: new Date().toISOString(),
+                input: message,
+                prompt: nodeId === "chat" ? `[Mock] User task: "${shortTitle}"` : undefined,
+              };
               const newNode: SubagentNode = {
                 id: nodeId,
                 label: nodeId.charAt(0).toUpperCase() + nodeId.slice(1),
                 type: nodeId === "chat" ? "LLM" : nodeId === "input" ? "PLANNING" : "TOOL",
                 pipeConnected: true,
                 state: { status: "running", currentTask: message },
+                steps: [...existingSteps, newStepRecord],
               };
               const updatedSubagents = existingIdx >= 0
                 ? s.subagents.map((n) => n.id === nodeId ? newNode : n)
@@ -527,10 +539,22 @@ export function App() {
             const finalEdges = s.executionEdges.map((edge) =>
               edge.state === "active" ? { ...edge, state: "completed" as const } : edge
             );
-            // 将所有 subagents 变为 success
+            // 将所有 subagents 变为 success，并完成最后一个 step
             const finalSubagents = s.subagents.map((n) => ({
               ...n,
               state: { status: "success" as const, output: `${n.label} completed` },
+              steps: (n.steps ?? []).map((step, idx, arr) =>
+                // 将最后一个 running step 标记为 success
+                idx === arr.length - 1 && step.status === "running"
+                  ? {
+                      ...step,
+                      status: "success" as const,
+                      output: `${n.label} completed successfully`,
+                      durationMs: Math.floor(Math.random() * 2000) + 500,
+                      tokens: Math.floor(Math.random() * 1000) + 100,
+                    }
+                  : step
+              ),
             }));
 
             return {
@@ -563,6 +587,178 @@ export function App() {
     },
     [activeSessionId, isElectron, runGraph]
   ); // handleTaskSubmit
+
+  /**
+   * 撤回某节点的某步骤
+   *
+   * 将该步骤标记为 reverted，并在 traceLogs 中追加一条记录。
+   * 下游边状态重置为 pending（若有），让用户可以选择重跑。
+   */
+  const handleNodeRevert = useCallback((nodeId: string, stepId: string) => {
+    const timestamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== activeSessionId) return s;
+
+        // 将该节点指定步骤标记为 reverted
+        const updatedSubagents = s.subagents.map((node) => {
+          if (node.id !== nodeId) return node;
+          return {
+            ...node,
+            steps: (node.steps ?? []).map((step) =>
+              step.id === stepId ? { ...step, status: "reverted" as const } : step
+            ),
+            // 节点状态改为 error（表示该步已撤销）
+            state: { status: "error" as const, errorMsg: `Step reverted by user` },
+          };
+        });
+
+        // 将该节点的出边重置为 pending（允许用户重新执行）
+        const updatedEdges = s.executionEdges.map((edge) => {
+          if (edge.source === nodeId && (edge.state === "active" || edge.state === "completed")) {
+            return { ...edge, state: "pending" as const };
+          }
+          return edge;
+        });
+
+        return {
+          ...s,
+          subagents: updatedSubagents,
+          executionEdges: updatedEdges,
+          traceLogs: [
+            ...s.traceLogs,
+            {
+              id: `revert-${stepId}-${Date.now()}`,
+              type: "SYSTEM" as const,
+              timestamp,
+              message: `⤺ Step reverted on node "${nodeId}" (step: ${stepId})`,
+              nodeId,
+            },
+          ],
+        };
+      })
+    );
+  }, [activeSessionId]);
+
+  /**
+   * 重新生成某节点的某步骤
+   *
+   * 1. 将该节点状态改回 running
+   * 2. 清除该节点的下游边（重置为 pending）
+   * 3. 新增一条 NodeStepRecord（isRerun=true，记录编辑后的 prompt）
+   * 4. Electron：真实重跑（TODO 扩展 IPC）；浏览器：mock 模拟延迟完成
+   */
+  const handleNodeRerun = useCallback((nodeId: string, stepId: string, editedPrompt: string) => {
+    const timestamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+    const newStepId = `step-rerun-${Date.now()}`;
+
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== activeSessionId) return s;
+
+        // 找到该节点
+        const targetNode = s.subagents.find((n) => n.id === nodeId);
+        if (!targetNode) return s;
+
+        // 新建重跑 step 记录
+        const existingSteps = targetNode.steps ?? [];
+        const newStep: NodeStepRecord = {
+          id: newStepId,
+          index: existingSteps.length + 1,
+          status: "running",
+          startedAt: new Date().toISOString(),
+          prompt: editedPrompt,
+          input: editedPrompt,
+          isRerun: true,
+        };
+
+        // 更新节点状态为 running
+        const updatedSubagents = s.subagents.map((node) => {
+          if (node.id !== nodeId) return node;
+          return {
+            ...node,
+            state: { status: "running" as const, currentTask: `Rerunning: ${editedPrompt.slice(0, 50)}...` },
+            steps: [...existingSteps, newStep],
+          };
+        });
+
+        // 将该节点出边重置为 pending（清除下游）
+        const updatedEdges = s.executionEdges.map((edge) => {
+          if (edge.source === nodeId) {
+            return { ...edge, state: "pending" as const };
+          }
+          return edge;
+        });
+
+        return {
+          ...s,
+          subagents: updatedSubagents,
+          executionEdges: updatedEdges,
+          traceLogs: [
+            ...s.traceLogs,
+            {
+              id: `rerun-${newStepId}`,
+              type: "AGENT_ACT" as const,
+              timestamp,
+              message: `↻ Rerunning node "${nodeId}" with edited prompt`,
+              nodeId,
+            },
+          ],
+        };
+      })
+    );
+
+    // ── 浏览器 dev 模式：模拟重跑结果（1.5s 后完成）──────────────
+    if (!isElectron) {
+      setTimeout(() => {
+        const doneTime = new Date().toLocaleTimeString("en-GB", { hour12: false });
+        const mockRerunOutput = `[Rerun] Response for: "${editedPrompt.slice(0, 80)}"`;
+
+        setSessions((prev) =>
+          prev.map((s) => {
+            if (s.id !== activeSessionId) return s;
+            const updatedSubagents = s.subagents.map((node) => {
+              if (node.id !== nodeId) return node;
+              return {
+                ...node,
+                state: { status: "success" as const, output: mockRerunOutput },
+                steps: (node.steps ?? []).map((step) =>
+                  step.id === newStepId
+                    ? { ...step, status: "success" as const, output: mockRerunOutput, durationMs: 1480, tokens: Math.floor(Math.random() * 800) + 200 }
+                    : step
+                ),
+              };
+            });
+
+            // 将出边重新激活（模拟下游继续执行）
+            const updatedEdges = s.executionEdges.map((edge) => {
+              if (edge.source === nodeId && edge.state === "pending") {
+                return { ...edge, state: "completed" as const };
+              }
+              return edge;
+            });
+
+            return {
+              ...s,
+              subagents: updatedSubagents,
+              executionEdges: updatedEdges,
+              traceLogs: [
+                ...s.traceLogs,
+                {
+                  id: `rerun-done-${newStepId}`,
+                  type: "SYSTEM" as const,
+                  timestamp: doneTime,
+                  message: `↻ Rerun completed for node "${nodeId}"`,
+                  nodeId,
+                },
+              ],
+            };
+          })
+        );
+      }, 1500);
+    }
+    // TODO Electron：调用 IPC 真实重跑指定节点
+  }, [activeSessionId, isElectron]);
 
   /** 停止当前 Run */
   const handleStop = useCallback(async () => {
@@ -655,6 +851,8 @@ export function App() {
                     executionEdges={currentSession.executionEdges}
                     onTaskSubmit={handleTaskSubmit}
                     onStop={handleStop}
+                    onNodeRevert={handleNodeRevert}
+                    onNodeRerun={handleNodeRerun}
                   />
                 </motion.div>
               </AnimatePresence>

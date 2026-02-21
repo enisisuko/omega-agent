@@ -11,6 +11,41 @@ export type SubagentCardState =
   | { status: "autofix"; skillName: string; originalError: string }
   | { status: "success"; output: string; tokens?: number };
 
+/**
+ * 单次节点执行步骤记录（展开面板中显示的历史条目）
+ *
+ * 每次节点被执行（含重跑）都会追加一条记录，
+ * 用于在展开面板中显示输入/输出/耗时/状态，
+ * 并支持单步撤回和重新生成。
+ */
+export interface NodeStepRecord {
+  /** 步骤唯一 ID */
+  id: string;
+  /** 步骤序号（从 1 开始） */
+  index: number;
+  /** 该步骤的状态 */
+  status: "running" | "success" | "error" | "reverted";
+  /** 执行时间戳（ISO 字符串） */
+  startedAt: string;
+  /** 耗时（毫秒） */
+  durationMs?: number;
+  /**
+   * 发送给 AI 的 Prompt（LLM 节点专用）
+   * 可在重新生成对话框中手动修改
+   */
+  prompt?: string;
+  /** 节点接收的输入（JSON 字符串或纯文本） */
+  input?: string;
+  /** 节点产生的输出（JSON 字符串或纯文本） */
+  output?: string;
+  /** 消耗的 token 数 */
+  tokens?: number;
+  /** 错误信息（status=error 时） */
+  errorMsg?: string;
+  /** 是否为重跑步骤（相对于上一步的重新生成） */
+  isRerun?: boolean;
+}
+
 /** Subagent 节点数据 (用于 Execution Engine 层渲染) */
 export interface SubagentNode {
   id: string;
@@ -19,6 +54,11 @@ export interface SubagentNode {
   state: SubagentCardState;
   /** 绑定到 Orchestrator 的连线数据 */
   pipeConnected: boolean;
+  /**
+   * 该节点的执行步骤历史（按时间顺序，最新在末尾）
+   * 点击展开节点时显示；支持单步撤回和重新生成
+   */
+  steps?: NodeStepRecord[];
 }
 
 /**
