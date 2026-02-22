@@ -1,133 +1,237 @@
 # 🧊 ICee Agent
 
-> **Trace-First Agent Graph Runtime** — 可视化 AI 多智能体协作平台
+<div align="center">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Node](https://img.shields.io/badge/Node-%3E%3D20.0.0-brightgreen)](https://nodejs.org/)
-[![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9.0.0-orange)](https://pnpm.io/)
-[![Electron](https://img.shields.io/badge/Electron-Desktop-blueviolet)](https://www.electronjs.org/)
+**A local-first, visual AI agent desktop app — built on a ReAct loop runtime with real-time node visualization.**
 
----
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/Node-%3E%3D20-brightgreen)](https://nodejs.org/)
+[![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-orange)](https://pnpm.io/)
+[![Electron](https://img.shields.io/badge/Electron-35-blueviolet)](https://www.electronjs.org/)
+[![React](https://img.shields.io/badge/React-18-61dafb)](https://react.dev/)
 
-## ✨ 项目简介
+[中文文档](README.zh.md) · [Report Bug](https://github.com/enisisuko/ICee-agent/issues) · [Request Feature](https://github.com/enisisuko/ICee-agent/issues)
 
-ICee Agent 是一个**图形化 AI 智能体协作运行时**，支持多智能体节点的可视化编排、实时 Trace 日志监控和链式思考执行流。
-
-基于 **Electron + React** 构建桌面应用，内核采用 **Graph Runtime** 驱动多节点 LLM 协作，让你能直观地看到每一步 AI 的思考过程。
-
----
-
-## 🌟 核心特性
-
-### 🧠 智能体图执行
-- **链式思考图**：Input → Planner → Context → Executor → Reflector → Output 六节点协作
-- **实时流式输出**：支持 Token 级别的流式响应
-- **多轮对话**：每轮独立执行图，历史轮半透明展示
-
-### 🎨 可视化界面
-- **Nerve Center 画布**：垂直滚动列表，节点按拓扑顺序排列
-- **NodeConnector 连线**：动态流动效果，实时反映执行状态（pending/running/done/failed）
-- **Trace Log 抽屉**：右侧详细日志面板，记录每步 LLM 调用
-
-### 🔌 Provider 管理
-- **多 Provider 支持**：Ollama、OpenAI Compatible（LM Studio、Groq 等）
-- **热重载配置**：运行中切换模型无需重启
-- **SQLite 持久化**：Provider 配置本地安全存储
-
-### 🛠️ 内置工具集
-- **web_search**：DuckDuckGo 搜索（无需 API Key）
-- **http_fetch**：抓取任意 URL 内容
-- **clipboard_read/write**：剪贴板读写
-- **MCP 协议支持**：Model Context Protocol 工具接入
-
-### 🤖 内置 Agent Skills
-- **ContextCompressor**：上下文超限自动压缩
-- **RetryWithBackoff**：指数退避自动重试
-- **OutputFormatter**：结构化输出格式化
-- **WebSearchSkill**：快速网络搜索
+</div>
 
 ---
 
-## 🚀 快速开始
+![ICee Agent in action](screenshots/icee-v034-fixed.png)
 
-### 环境要求
-- **Node.js** >= 20.0.0
-- **pnpm** >= 9.0.0
-- **Ollama**（本地 LLM）或任意 OpenAI Compatible 服务
+---
 
-### 安装依赖
+## What is ICee Agent?
+
+ICee Agent is a **desktop application** that lets you run AI agents locally using any LLM — Ollama, LM Studio, or any OpenAI-compatible API. It visualizes the agent's thinking process step-by-step as a live node graph, so you can see exactly what the AI is doing at every moment.
+
+Under the hood, it runs a **ReAct (Reason + Act) loop**: the agent autonomously thinks, calls tools, observes results, and decides whether to continue or complete — up to 20 iterations, with real-time streaming to the UI.
+
+---
+
+## ✨ Highlights
+
+| Feature | Details |
+|---------|---------|
+| 🧠 **ReAct Loop Runtime** | Autonomous Think → Act → Observe cycles, self-terminating with `<attempt_completion>` |
+| 🎨 **Live Node Visualization** | Every step rendered as an animated card with status (thinking / acting / done / failed) |
+| 🔌 **8 Built-in Tools** | `web_search`, `http_fetch`, `fs_read`, `fs_write`, `code_exec`, `clipboard_read`, `clipboard_write`, `browser_open` |
+| 🔀 **Fork & Rerun** | Branch from any historical step — replay with edited prompts without re-running from scratch |
+| 🔥 **Streaming Everywhere** | Token-level streaming from LLM → live typewriter output in UI |
+| 📋 **Rules System** | Global rules (DB) + per-project `.icee/rules.md` — injected into every system prompt |
+| 🔌 **MCP Support** | Model Context Protocol tool server integration |
+| 🌏 **i18n** | Full Chinese / English UI, auto-detected from system locale |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) >= 20.0.0
+- [pnpm](https://pnpm.io/) >= 9.0.0
+- A local LLM: [Ollama](https://ollama.com/) (recommended) or any OpenAI-compatible service
+
+### 1. Install
+
 ```bash
+git clone https://github.com/enisisuko/ICee-agent.git
+cd ICee-agent
 pnpm install
 ```
 
-### 启动桌面应用
+### 2. Start Ollama (recommended for first run)
+
+```bash
+ollama serve
+ollama pull qwen2.5:7b   # or llama3.2, deepseek-r1:8b, etc.
+```
+
+### 3. Launch the desktop app
+
 ```bash
 pnpm desktop
 ```
 
-### 完整构建
-```bash
-pnpm build
-```
+The app opens automatically. Head to **Settings** to configure your LLM provider.
 
 ---
 
-## 📦 项目结构
+## ⚙️ Provider Setup
+
+Open **Settings → Providers** and add your LLM:
+
+| Provider | Base URL | Notes |
+|----------|----------|-------|
+| Ollama | `http://localhost:11434` | Default, no API key needed |
+| LM Studio | `http://localhost:1234/v1` | Local inference |
+| OpenAI | `https://api.openai.com/v1` | Requires API key |
+| Groq | `https://api.groq.com/openai/v1` | Fast cloud inference |
+| Azure OpenAI | `https://<resource>.openai.azure.com/v1` | Enterprise |
+
+---
+
+## 🗂️ Project Structure
+
+This is a **pnpm monorepo** powered by Turborepo:
 
 ```
-ICeeAgent/
+ICee-agent/
 ├── apps/
-│   └── desktop/              # Electron 桌面应用
-│       ├── src/
-│       │   ├── main/         # 主进程（IPC、MCP、DB）
-│       │   ├── preload/      # 预加载脚本
-│       │   └── renderer/     # React 渲染进程
-│       │       ├── components/  # UI 组件
-│       │       ├── hooks/       # 自定义 Hooks
-│       │       └── i18n/        # 国际化（中/英）
+│   └── desktop/                  # Electron desktop app
+│       └── src/
+│           ├── main/             # Main process: IPC, runtime init, MCP
+│           │   ├── index.ts      # Core orchestrator (~1464 lines)
+│           │   └── mcp/
+│           │       └── BuiltinMcpTools.ts   # 8 built-in tools
+│           ├── preload/          # Secure context bridge
+│           └── renderer/         # React UI
+│               ├── App.tsx       # Root component, session state
+│               ├── components/
+│               │   ├── nerve-center/     # Canvas: nodes, edges, trace
+│               │   └── layout/           # Sidebar, navigation
+│               ├── hooks/        # useIceeRuntime, useDraggableCanvas
+│               └── i18n/         # zh/en translations
 ├── packages/
-│   ├── core/                 # 运行时核心（Graph Runtime）
-│   ├── shared/               # 共享 Schema（Zod）
-│   └── db/                   # SQLite 数据库层
-└── demo/                     # 示例项目
+│   ├── core/                     # Agent execution engine
+│   │   ├── runtime.ts            # GraphRuntime (run/forkRun/cancel)
+│   │   ├── AgentLoopExecutor.ts  # ReAct loop (max 20 iters)
+│   │   ├── executors/            # LLM / Planning / Memory / Reflection / Tool
+│   │   ├── skills/               # AgentSkills (compress/retry/format/search)
+│   │   └── providers/            # OllamaProvider, OpenAICompatibleProvider
+│   ├── shared/                   # Zod schemas, shared types
+│   └── db/                       # SQLite layer (better-sqlite3, 8 tables)
+└── demo/
+    ├── ollama-chat/              # Minimal 3-node chat example
+    └── search-summarize/         # 4-node search + summarize pipeline
 ```
 
 ---
 
-## ⚙️ Provider 配置
+## 🧩 Agent Node Types
 
-在应用的 **Settings** 页面添加 LLM Provider：
+The agent graph supports 7 node types, each with a dedicated executor:
 
-| 类型 | 示例 |
-|------|------|
-| Ollama | `http://localhost:11434` |
-| LM Studio | `http://localhost:1234/v1` |
-| OpenAI | `https://api.openai.com/v1` |
-| Groq | `https://api.groq.com/openai/v1` |
-
----
-
-## 🔧 技术栈
-
-| 层 | 技术 |
-|----|------|
-| 桌面壳 | Electron |
-| UI | React + TypeScript |
-| 动画 | Framer Motion |
-| 样式 | Tailwind CSS |
-| 数据库 | SQLite (better-sqlite3) |
-| 运行时 | 自研 Graph Runtime |
-| 包管理 | pnpm Workspaces + Turborepo |
-| Schema | Zod |
+| Node | Type | Role |
+|------|------|------|
+| Input | `INPUT` | Entry point, receives user task |
+| Planner | `PLANNING` | Decomposes task into steps |
+| Context | `MEMORY` | Extracts key constraints and context |
+| Executor | `LLM` | Generates the actual output |
+| Reflector | `REFLECTION` | Quality review and integration |
+| Tool | `TOOL` | Calls external tools / MCP servers |
+| Output | `OUTPUT` | Formats and delivers final result |
 
 ---
 
-## 📝 License
+## 🛠️ Built-in Tools (no external service needed)
 
-MIT © 2026 ICee Agent Team
+All tools run directly in the Electron main process:
+
+| Tool | Description |
+|------|-------------|
+| `web_search` | DuckDuckGo search — no API key required |
+| `http_fetch` | Fetch any URL, strips HTML automatically |
+| `fs_read` | Read file or list directory |
+| `fs_write` | Write file (creates directories as needed) |
+| `code_exec` | Execute JS / Python / Bash inline |
+| `clipboard_read` | Read system clipboard |
+| `clipboard_write` | Write to system clipboard |
+| `browser_open` | Open URL in system default browser |
 
 ---
 
-<div align="center">
-  <sub>Made with ❄️ by the ICee Agent Team</sub>
-</div>
+## 🔀 Fork Run — Time-Travel Debugging
+
+One of ICee's signature features: **branch from any historical step**.
+
+1. Click any completed node in the graph
+2. Edit its prompt in the rerun modal
+3. ICee creates a **fork run** — inheriting all previous steps, re-executing only from the branch point
+
+This means you can experiment with different prompts mid-workflow without paying the cost of re-running everything from scratch.
+
+---
+
+## 📋 Rules System
+
+ICee supports a two-layer rules system that shapes agent behavior:
+
+- **Global Rules** — stored in the local SQLite DB, applied to every session
+- **Project Rules** — place a `.icee/rules.md` file in any project directory; ICee auto-loads it when you work in that folder
+
+Both are injected into the system prompt before each agent run.
+
+---
+
+## 🔌 MCP Integration
+
+ICee connects to [Model Context Protocol](https://modelcontextprotocol.io/) tool servers. Configure a filesystem MCP server or any custom server via Settings. The built-in tools take priority over MCP tools when names conflict.
+
+---
+
+## 📦 Tech Stack
+
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Desktop shell | Electron | 35 |
+| UI framework | React | 18 |
+| Animations | Framer Motion | 11 |
+| Styling | Tailwind CSS | 3 |
+| Build tool | Vite | 5 |
+| Database | SQLite (better-sqlite3) | — |
+| Packaging | electron-builder | 24 |
+| Monorepo | pnpm Workspaces + Turborepo | — |
+| Schema validation | Zod | — |
+| Protocol | Model Context Protocol SDK | 1.26 |
+
+---
+
+## 🗺️ Roadmap
+
+- [x] ReAct agent loop with streaming
+- [x] Live node visualization (NerveCenter)
+- [x] 8 built-in tools (no API key)
+- [x] Fork/rerun from any step
+- [x] Multi-provider support (Ollama, OpenAI compatible)
+- [x] Rules system (global + per-project)
+- [x] MCP tool server integration
+- [x] Multi-turn conversation
+- [ ] Electron packaged installer (NSIS / DMG)
+- [ ] Sub-agent marketplace presets
+- [ ] Plugin system (architecture in place)
+- [ ] Benchmark suite
+- [ ] Web version (renderer-only mode)
+
+---
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up a dev environment, add a new Provider, or build a new node executor.
+
+PRs and issues are welcome! If you're experimenting with local LLMs, tooling, or MCP integrations, we'd love to hear about your setup.
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) © 2026 ICee Agent Contributors
