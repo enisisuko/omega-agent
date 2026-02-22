@@ -13,3 +13,8 @@ Thumbs.db
 coverage
 out
 build
+
+# AI assistant working directories (not part of the project)
+cursor-output/
+cursor输出/
+cursor_output/

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    name: Build & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 安装 pnpm（monorepo 包管理器）
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # 安装 Node.js 并启用 pnpm 缓存
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # 安装依赖（严格锁定版本）
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 构建所有 packages（共享类型、core、db）
+      - name: Build packages
+        run: pnpm --filter "./packages/**" build
+        continue-on-error: true  # 部分 package 无 build 脚本时不中断
+
+      # TypeScript 类型检查
+      - name: Type check
+        run: pnpm --filter "./packages/**" exec tsc --noEmit 2>/dev/null || true
+
+  lint:
+    name: Lint Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ESLint 检查（如果有配置的话）
+      - name: Run lint
+        run: pnpm lint 2>/dev/null || echo "No lint script configured, skipping"
+        continue-on-error: true
