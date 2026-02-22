@@ -1,7 +1,6 @@
-﻿import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import type { SidebarRoute, ConversationSession } from "../../types/ui.js";
 import { useLanguage } from "../../i18n/LanguageContext.js";
-import logoUrl from "../../assets/logo.png";
 
 interface SidebarProps {
   activeRoute: SidebarRoute;
@@ -65,15 +64,20 @@ export function Sidebar({
         borderRight: "1px solid rgba(255,255,255,0.06)",
       }}
     >
-      {/* ① Logo */}
+      {/* ① Logo — 文字标识 */}
       <div className="flex items-center px-3 py-3 flex-shrink-0">
-        <img
-          src={logoUrl}
-          alt="Omega"
-          className="w-full"
-          style={{ maxHeight: "36px", objectFit: "contain", objectPosition: "left center" }}
-          draggable={false}
-        />
+        <span
+          style={{
+            fontFamily: "'SF Pro Display', 'Segoe UI', system-ui, sans-serif",
+            fontSize: "20px",
+            fontWeight: 700,
+            letterSpacing: "0.04em",
+            color: "rgba(255,255,255,0.92)",
+            userSelect: "none",
+          }}
+        >
+          Omega
+        </span>
       </div>
 
       {/* ② 页面导航 */}
