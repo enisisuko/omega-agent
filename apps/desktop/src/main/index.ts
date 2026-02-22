@@ -452,92 +452,98 @@ async function initRuntime(win: BrowserWindow) {
       });
     }
 
-    // ── 注册节点执行器 ─────────────────────────
+    // ── 共享 LLM invokeProvider 闭包 ──────────────────────────────
+    // 提取为独立函数，供 LLM / PLANNING / MEMORY / REFLECTION 四种节点共用
+    // 每次调用都从 DB 实时读取最新默认 Provider，保证 Settings 里改完即生效
+    const sharedInvokeProvider = async (config: import("@icee/shared").LLMNodeConfig, _input: unknown) => {
+      let liveProvider = globalProviderRef.instance;
+      let liveModel = globalProviderRef.model;
+
+      try {
+        const liveDb = await ensureEarlyDb();
+        const liveRow = getEffectiveDefaultProvider(liveDb);
+
+        if (liveRow) {
+          liveModel = liveRow.model ?? (liveRow.type === "ollama" ? "llama3.2" : "gpt-4o-mini");
+          const liveUrl = liveRow.base_url;
+
+          console.log(`[ICEE LLM] Live provider from DB: id=${liveRow.id} type=${liveRow.type} url=${liveUrl} model=${liveModel}`);
+
+          if (liveUrl !== globalProviderRef.url || liveRow.type !== globalProviderRef.type) {
+            if (liveRow.type === "openai-compatible" || liveRow.type === "lm-studio" || liveRow.type === "custom") {
+              liveProvider = new OpenAICompatibleProvider({
+                id: liveRow.id,
+                name: liveRow.name,
+                baseUrl: liveUrl,
+                ...(liveRow.api_key && { apiKey: liveRow.api_key }),
+              });
+            } else {
+              liveProvider = new OllamaProvider({ baseUrl: liveUrl });
+            }
+            globalProviderRef.instance = liveProvider;
+            globalProviderRef.model = liveModel;
+            globalProviderRef.url = liveUrl;
+            globalProviderRef.type = liveRow.type;
+            console.log(`[ICEE LLM] Provider instance updated to ${liveRow.type} @ ${liveUrl} model=${liveModel}`);
+          } else {
+            console.log(`[ICEE LLM] Provider unchanged (${liveRow.type} @ ${liveUrl}), reusing cached instance`);
+          }
+        } else {
+          console.log(`[ICEE LLM] No default provider in DB, using cached: type=${globalProviderRef.type} url=${globalProviderRef.url} model=${liveModel}`);
+        }
+      } catch (e) {
+        console.warn("[ICEE LLM] Failed to read live provider from DB, using cached:", e);
+      }
+
+      if (!liveProvider) {
+        throw new Error("No LLM provider available. Please configure a provider in Settings.");
+      }
+
+      const resolvedModel = (config.model && config.model.trim()) ? config.model : liveModel;
+
+      console.log(`[ICEE LLM] Calling provider with model=${resolvedModel}`);
+      console.log(`[ICEE LLM] systemPrompt="${config.systemPrompt?.slice(0, 60)}"`);
+      console.log(`[ICEE LLM] promptTemplate(rendered)="${String(config.promptTemplate).slice(0, 200)}"`);
+
+      const result = await liveProvider.generateComplete({
+        model: resolvedModel,
+        messages: [
+          {
+            role: "system",
+            content: config.systemPrompt ?? "You are a helpful assistant.",
+          },
+          { role: "user", content: config.promptTemplate ?? "" },
+        ],
+        stream: true,
+        ...(config.temperature !== undefined && { temperature: config.temperature }),
+        ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
+      });
+
+      // 实时推送 token 数量更新
+      win.webContents.send("icee:token-update", {
+        tokens: result.tokens,
+        costUsd: result.costUsd,
+      });
+
+      return result;
+    };
+
+    // ── 注册节点执行器（四种 LLM 型节点均共用 sharedInvokeProvider）─
     const registry = new NodeExecutorRegistry();
     registry.register(new InputNodeExecutor());
     registry.register(new OutputNodeExecutor());
-    registry.register(new MemoryNodeExecutor());
 
-    registry.register(
-      new LLMNodeExecutor(async (config, _input) => {
-        // ── 每次 LLM 调用时，从 DB 实时读取最新的默认 Provider ──────────
-        // 这样用户在 Settings 里修改 Provider 后，无需重启即刻生效，
-        // 也不依赖 globalProviderRef 是否被正确热重载
-        let liveProvider = globalProviderRef.instance;
-        let liveModel = globalProviderRef.model;
+    // LLM 节点：直接执行 LLM 调用
+    registry.register(new LLMNodeExecutor(sharedInvokeProvider));
 
-        try {
-          const liveDb = await ensureEarlyDb();
-          const liveRow = getEffectiveDefaultProvider(liveDb);
+    // PLANNING 节点：任务规划专家，实际调用 LLM 生成步骤计划
+    registry.register(new PlanningNodeExecutor(sharedInvokeProvider));
 
-          if (liveRow) {
-            liveModel = liveRow.model ?? (liveRow.type === "ollama" ? "llama3.2" : "gpt-4o-mini");
-            const liveUrl = liveRow.base_url;
+    // MEMORY 节点：上下文分析专家，实际调用 LLM 提取技术要点
+    registry.register(new MemoryNodeExecutor(sharedInvokeProvider));
 
-            console.log(`[ICEE LLM] Live provider from DB: id=${liveRow.id} type=${liveRow.type} url=${liveUrl} model=${liveModel}`);
-
-            // 使用 globalProviderRef.type（DB 中的 type 字符串）来比较，避免 constructor.name 不匹配
-            if (liveUrl !== globalProviderRef.url || liveRow.type !== globalProviderRef.type) {
-              if (liveRow.type === "openai-compatible" || liveRow.type === "lm-studio" || liveRow.type === "custom") {
-                liveProvider = new OpenAICompatibleProvider({
-                  id: liveRow.id,
-                  name: liveRow.name,
-                  baseUrl: liveUrl,
-                  ...(liveRow.api_key && { apiKey: liveRow.api_key }),
-                });
-              } else {
-                liveProvider = new OllamaProvider({ baseUrl: liveUrl });
-              }
-              // 同步更新 globalProviderRef，供下次快速读取
-              globalProviderRef.instance = liveProvider;
-              globalProviderRef.model = liveModel;
-              globalProviderRef.url = liveUrl;
-              globalProviderRef.type = liveRow.type;
-              console.log(`[ICEE LLM] Provider instance updated to ${liveRow.type} @ ${liveUrl} model=${liveModel}`);
-            } else {
-              console.log(`[ICEE LLM] Provider unchanged (${liveRow.type} @ ${liveUrl}), reusing cached instance`);
-            }
-          } else {
-            console.log(`[ICEE LLM] No default provider in DB, using cached: type=${globalProviderRef.type} url=${globalProviderRef.url} model=${liveModel}`);
-          }
-        } catch (e) {
-          console.warn("[ICEE LLM] Failed to read live provider from DB, using cached:", e);
-        }
-
-        if (!liveProvider) {
-          throw new Error("No LLM provider available. Please configure a provider in Settings.");
-        }
-
-        // config.model 若为空/undefined，则 fallback 到从 DB 读取的 liveModel
-        const resolvedModel = (config.model && config.model.trim()) ? config.model : liveModel;
-
-        console.log(`[ICEE LLM] Calling provider with model=${resolvedModel}`);
-        console.log(`[ICEE LLM] systemPrompt="${config.systemPrompt?.slice(0,50)}"`);
-        console.log(`[ICEE LLM] promptTemplate(rendered)="${String(config.promptTemplate).slice(0,200)}"`);
-
-        const result = await liveProvider.generateComplete({
-          model: resolvedModel,
-          messages: [
-            {
-              role: "system",
-              content: config.systemPrompt ?? "You are a helpful assistant.",
-            },
-            { role: "user", content: config.promptTemplate ?? "" },
-          ],
-          stream: true,
-          ...(config.temperature !== undefined && { temperature: config.temperature }),
-          ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
-        });
-
-        // 实时推送 token 数量更新
-        win.webContents.send("icee:token-update", {
-          tokens: result.tokens,
-          costUsd: result.costUsd,
-        });
-
-        return result;
-      })
-    );
+    // REFLECTION 节点：质量审查专家，实际调用 LLM 整合优化输出
+    registry.register(new ReflectionNodeExecutor(sharedInvokeProvider));
 
     // ── 真实 MCP 工具执行器（替换 Mock）─────────
     registry.register(
@@ -580,23 +586,6 @@ async function initRuntime(win: BrowserWindow) {
           return { result: null, error: (toolErr as Error).message };
         }
       })
-    );
-
-    registry.register(
-      new PlanningNodeExecutor(async (goal, _mode) => ({
-        tasks: [{ id: "task-1", description: String(goal), priority: 1 }],
-        totalSteps: 1,
-        strategy: "sequential" as const,
-      }))
-    );
-
-    registry.register(
-      new ReflectionNodeExecutor(async (input, threshold) => ({
-        shouldRetry: false,
-        confidence: (threshold ?? 0.6) + 0.1,
-        reasoning: "Output quality is acceptable",
-        modifiedOutput: input,
-      }))
     );
 
     const nodeRunner = new GraphNodeRunner(registry);

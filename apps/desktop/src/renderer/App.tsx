@@ -34,6 +34,31 @@ function genId() {
   return `run_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * 节点 ID → SubagentNode 类型映射（决定卡片顶部彩色光条颜色）
+ * 与 handleTaskSubmit 中 graphJson 的节点 ID 保持一致
+ */
+const NODE_ID_TYPE_MAP: Record<string, SubagentNode["type"]> = {
+  input:     "LLM",         // INPUT 节点，无特殊彩条
+  plan:      "PLANNING",    // 紫色 — 规划节点
+  decompose: "MEMORY",      // 青色 — 上下文分析节点
+  execute:   "LLM",         // 蓝色 — 执行节点
+  reflect:   "REFLECTION",  // 金色 — 反思节点
+  output:    "LLM",         // OUTPUT 节点，无特殊彩条
+  chat:      "LLM",         // 向后兼容旧版 3 节点图
+};
+
+/** 节点 ID → 友好标签映射 */
+const NODE_ID_LABEL_MAP: Record<string, string> = {
+  input:     "User Input",
+  plan:      "Planner",
+  decompose: "Context",
+  execute:   "Executor",
+  reflect:   "Reflector",
+  output:    "Response",
+  chat:      "AI Response",
+};
+
 /** 创建空白 idle 会话（New Chat 时使用） */
 function createBlankSession(): ConversationSession {
   return {
@@ -152,10 +177,15 @@ export function App() {
             const isStart = entry.message.includes("start") || entry.type === "AGENT_ACT";
             const isError = entry.message.toLowerCase().includes("error") || entry.message.toLowerCase().includes("failed");
 
+            // 查表获取节点类型（颜色标识）和友好标签
+            const nodeType = NODE_ID_TYPE_MAP[nodeId] ?? "LLM";
+            const nodeLabel = NODE_ID_LABEL_MAP[nodeId]
+              ?? (nodeId.charAt(0).toUpperCase() + nodeId.slice(1));
+
             const newNode: SubagentNode = {
               id: nodeId,
-              label: nodeId.charAt(0).toUpperCase() + nodeId.slice(1),
-              type: "LLM",
+              label: nodeLabel,
+              type: nodeType,
               pipeConnected: true,
               state: isError
                 ? { status: "error", errorMsg: entry.message }
@@ -293,21 +323,36 @@ export function App() {
       );
     }, [activeSessionId]),
 
-    // Token 实时更新（进度条用）
+    // Token 实时更新（进度条用）+ 上下文压缩预警
+    // 当单次 Run 累计 token 超过 TOKEN_WARN_THRESHOLD 时，
+    // 自动在 TraceLog 中追加系统警告，提示用户上下文即将压缩
     onTokenUpdate: useCallback((tokens: number, costUsd: number) => {
+      const TOKEN_WARN_THRESHOLD = 3000; // token 预警阈值（可按需调整）
       setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeSessionId
+        prev.map((s) => {
+          if (s.id !== activeSessionId) return s;
+          const prevTokens = s.orchestrator.totalTokens ?? 0;
+          // 仅在本次更新跨越阈值时追加一次警告（避免每次更新都追加）
+          const crossedThreshold =
+            prevTokens < TOKEN_WARN_THRESHOLD && tokens >= TOKEN_WARN_THRESHOLD;
+          const warnEntry: TraceLogEntry | null = crossedThreshold
             ? {
-                ...s,
-                orchestrator: {
-                  ...s.orchestrator,
-                  totalTokens: tokens,
-                  totalCostUsd: costUsd,
-                },
+                id: `ctx-warn-${Date.now()}`,
+                type: "SYSTEM" as const,
+                timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+                message: `⚠️ Context approaching limit (${tokens} tokens). Long context may be compressed automatically to maintain performance.`,
               }
-            : s
-        )
+            : null;
+          return {
+            ...s,
+            orchestrator: {
+              ...s.orchestrator,
+              totalTokens: tokens,
+              totalCostUsd: costUsd,
+            },
+            traceLogs: warnEntry ? [...s.traceLogs, warnEntry] : s.traceLogs,
+          };
+        })
       );
     }, [activeSessionId]),
 

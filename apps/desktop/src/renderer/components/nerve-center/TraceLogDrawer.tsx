@@ -62,6 +62,8 @@ export function TraceLogDrawer({ entries }: TraceLogDrawerProps) {
       >
         {entries.map((entry, i) => {
           const style = TYPE_STYLE[entry.type];
+          // 上下文压缩警告：SYSTEM 类型且包含 "Context approaching limit" 关键字
+          const isContextWarn = entry.type === "SYSTEM" && entry.message.includes("Context approaching limit");
           return (
             <motion.div
               key={entry.id}
@@ -69,6 +71,11 @@ export function TraceLogDrawer({ entries }: TraceLogDrawerProps) {
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.15, delay: i < entries.length - 3 ? 0 : (i - (entries.length - 3)) * 0.05 }}
               className="flex items-start gap-2 px-4 py-1 group hover:bg-white/[0.02] transition-colors"
+              style={isContextWarn ? {
+                background: "rgba(251,191,36,0.06)",
+                borderLeft: "2px solid rgba(251,191,36,0.50)",
+                borderRadius: "0 4px 4px 0",
+              } : undefined}
             >
               {/* 时间戳 */}
               <span className="text-2xs flex-shrink-0 mt-0.5" style={{ color: "rgba(255,255,255,0.18)", minWidth: "48px" }}>
@@ -78,14 +85,21 @@ export function TraceLogDrawer({ entries }: TraceLogDrawerProps) {
               {/* 类型标签 */}
               <span
                 className="text-2xs flex-shrink-0 mt-0.5 font-medium"
-                style={{ color: style.color, minWidth: "36px", opacity: 0.70 }}
+                style={{
+                  color: isContextWarn ? "#fbbf24" : style.color,
+                  minWidth: "36px",
+                  opacity: isContextWarn ? 1 : 0.70,
+                }}
               >
                 {style.label}
               </span>
 
               {/* 消息内容 */}
               <div className="flex-1 min-w-0">
-                <span className="text-xs leading-relaxed break-all" style={{ color: "rgba(255,255,255,0.55)" }}>
+                <span
+                  className="text-xs leading-relaxed break-all"
+                  style={{ color: isContextWarn ? "rgba(251,191,36,0.85)" : "rgba(255,255,255,0.55)" }}
+                >
                   {entry.message}
                 </span>
                 {entry.details && (

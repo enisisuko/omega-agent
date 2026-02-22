@@ -316,7 +316,7 @@ export function NerveCenter({
 
                     {/* 节点卡片 */}
                     <AnimatePresence>
-                      {roundNodes.map((node, nodeIdx) => {
+                      {roundNodes.map((node) => {
                         const pos = rPos.get(node.id);
                         if (!pos) return null;
                         const { left, top } = toTopLeft(pos);
@@ -327,6 +327,8 @@ export function NerveCenter({
                           ? Math.max((parentPos.y - pos.y) * 0.35, -30)
                           : -20;
                         const initialX = parentPos ? (parentPos.x - pos.x) * 0.25 : 0;
+                        // 同层节点同时出现（level 驱动 delay）
+                        const levelDelay = pos.level * 0.12;
                         return (
                           <motion.div
                             key={`r${ri}-${node.id}`}
@@ -344,7 +346,7 @@ export function NerveCenter({
                             transition={{
                               duration: 0.42,
                               ease: [0.23, 1, 0.32, 1],
-                              delay: nodeIdx * 0.04,
+                              delay: levelDelay,
                             }}
                             onMouseDown={(e) => e.stopPropagation()}
                             onDoubleClick={(e) => e.stopPropagation()}
@@ -395,24 +397,24 @@ export function NerveCenter({
 
               {/* 节点卡片（absolute 定位到计算坐标） */}
               <AnimatePresence>
-                {dynamicNodes.map((node, idx) => {
+                {dynamicNodes.map((node) => {
                   const pos = positions.get(node.id);
                   if (!pos) return null;
                   const { left, top } = toTopLeft(pos);
 
-                  // 计算出现动画的初始偏移：从父节点位置向下滑出
-                  // 找到该节点的父节点（source edge），取父节点 Y 坐标与当前节点 Y 的差值
+                  // 出现动画：从父节点位置滑出
                   const parentEdge = executionEdges.find(e => e.target === node.id);
                   const parentPos = parentEdge ? positions.get(parentEdge.source) : undefined;
-                  // initialY：从父节点方向滑入（向上出发，落到当前位置）
-                  // 没有父节点则从上方 20px 淡入
                   const initialY = parentPos
-                    ? Math.max((parentPos.y - pos.y) * 0.35, -30)  // 最多向上偏移 30px
+                    ? Math.max((parentPos.y - pos.y) * 0.35, -30)
                     : -20;
-                  // 左右方向偏移（从父节点 X 偏移过来）
                   const initialX = parentPos
-                    ? (parentPos.x - pos.x) * 0.25   // 轻微横向滑入
+                    ? (parentPos.x - pos.x) * 0.25
                     : 0;
+
+                  // 用 BFS level 决定出现延迟：同层节点同时出现，不同层按 level * 0.12s 错落
+                  // 这样 plan(level=1) 先出现，decompose/execute(level=2) 同时出现，reflect(level=3) 再出现
+                  const levelDelay = pos.level * 0.12;
 
                   return (
                     <motion.div
@@ -425,7 +427,7 @@ export function NerveCenter({
                       transition={{
                         duration: 0.42,
                         ease: [0.23, 1, 0.32, 1],
-                        delay: idx * 0.04,   // 节点依次出现，错开 40ms
+                        delay: levelDelay,
                       }}
                       onMouseDown={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => e.stopPropagation()}
