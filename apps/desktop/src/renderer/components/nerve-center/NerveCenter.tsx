@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useRef, useState, useEffect } from "react";
 import { OrchestratorNode } from "./OrchestratorNode.js";
 import { SubagentCard } from "./SubagentCard.js";
 import { ResourceSubstrate } from "./ResourceSubstrate.js";
@@ -41,9 +42,13 @@ interface NerveCenterProps {
   /** 可用的 Provider 列表（用于模型选择下拉） */
   providers?: ProviderConfig[];
   /** 当前选中的模型 */
-  selectedModel?: string;
+  selectedModel?: string | undefined;
   /** 模型变更回调 */
-  onModelChange?: (model: string) => void;
+  onModelChange?: ((model: string) => void) | undefined;
+  /** 是否正在流式输出中 */
+  isStreaming?: boolean | undefined;
+  /** 流式 token 累积文本 */
+  streamingText?: string | undefined;
 }
 
 /** Edge 状态类型 */
@@ -110,7 +115,7 @@ function NodeConnector({ state }: { state?: EdgeState }) {
 function deriveDisplayNodes(
   edges: ExecutionEdge[],
   realSubagents: SubagentNode[],
-): { node: SubagentNode; edgeAfter?: ExecutionEdge }[] {
+): Array<{ node: SubagentNode; edgeAfter?: ExecutionEdge | undefined }> {
   if (edges.length === 0 && realSubagents.length === 0) return [];
 
   const realMap = new Map(realSubagents.map((s) => [s.id, s]));
@@ -181,6 +186,7 @@ function deriveDisplayNodes(
 
   for (let i = 0; i < visibleSorted.length; i++) {
     const id = visibleSorted[i];
+    if (!id) continue;
     const nextId = visibleSorted[i + 1];
 
     // 构建节点数据
@@ -217,11 +223,11 @@ function deriveDisplayNodes(
     }
 
     // 找到当前节点到下一节点的 edge
-    const edgeAfter = nextId
+    const edgeAfter = (nextId != null)
       ? edges.find(e => e.source === id && e.target === nextId)
       : undefined;
 
-    result.push({ node, edgeAfter });
+    result.push({ node: node as SubagentNode, ...(edgeAfter !== undefined && { edgeAfter }) });
   }
 
   return result;
@@ -253,6 +259,8 @@ export function NerveCenter({
   providers = [],
   selectedModel,
   onModelChange,
+  isStreaming = false,
+  streamingText = "",
 }: NerveCenterProps) {
   // 最新轮的 AI 回复
   const useRoundsMode = rounds.length > 0;
@@ -277,24 +285,52 @@ export function NerveCenter({
 
   const isEmpty = displayEntries.length === 0 && historyRounds.length === 0;
 
+  // ── 滚动监听：超过 100px 时折叠 OrchestratorNode ────────────────
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null); // 用于自动滚动到底部
+  const [orchestratorCollapsed, setOrchestratorCollapsed] = useState(false);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      setOrchestratorCollapsed(el.scrollTop > 100);
+    };
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // ── 自动滚动：displayEntries 增加时滚动到底部 ────────────────────
+  const prevEntriesLen = useRef(0);
+  useEffect(() => {
+    if (displayEntries.length > prevEntriesLen.current) {
+      prevEntriesLen.current = displayEntries.length;
+      // 使用 setTimeout 确保 DOM 更新后再滚动
+      setTimeout(() => {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }, 100);
+    }
+  }, [displayEntries.length]);
+
   return (
     <div className="flex flex-col h-full">
 
-      {/* ── Top: Orchestrator Brain + 输入栏 ── */}
-      <div className="flex-shrink-0 flex flex-col items-center gap-3 px-8 pt-6 pb-3">
-        <OrchestratorNode data={orchestrator} />
+      {/* ── Top: Orchestrator Brain（随滚动折叠）+ 输入栏 ── */}
+      <div className="flex-shrink-0 flex flex-col gap-3 px-6 pt-6 pb-3">
+        <OrchestratorNode data={orchestrator} collapsed={orchestratorCollapsed} />
         <TaskInputBar
           orchestratorState={orchestrator.state}
           onSubmit={onTaskSubmit ?? (() => {})}
           {...(onStop !== undefined && { onStop })}
           providers={providers}
-          selectedModel={selectedModel}
-          onModelChange={onModelChange}
+          {...(selectedModel !== undefined && { selectedModel })}
+          {...(onModelChange !== undefined && { onModelChange })}
         />
       </div>
 
       {/* ── Middle: 垂直滚动节点列表 ── */}
       <div
+        ref={scrollRef}
         className="flex-1 overflow-y-auto"
         style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(255,255,255,0.08) transparent" }}
       >
@@ -405,14 +441,14 @@ export function NerveCenter({
                 />
                 {/* 节点间 Connector（非最后一个节点） */}
                 {idx < displayEntries.length - 1 && (
-                  <NodeConnector state={edgeAfter?.state} />
+                  <NodeConnector state={edgeAfter?.state ?? "pending"} />
                 )}
               </motion.div>
             ))}
           </AnimatePresence>
 
-          {/* AI 最终回复（内嵌在节点列表末尾，Run 完成后淡入） */}
-          {latestAiOutput && displayEntries.length > 0 && (
+          {/* AI 最终回复（内嵌在节点列表末尾，Run 完成后淡入；streaming 中实时显示） */}
+          {(latestAiOutput || isStreaming) && (
             <motion.div
               key="ai-output-inline"
               className="mt-3"
@@ -420,9 +456,16 @@ export function NerveCenter({
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4, ease: "easeOut" }}
             >
-              <AiOutputCard output={latestAiOutput} />
+              <AiOutputCard
+                output={latestAiOutput}
+                isStreaming={isStreaming}
+                streamingText={streamingText}
+              />
             </motion.div>
           )}
+
+          {/* 自动滚动锚点（始终在底部） */}
+          <div ref={bottomRef} style={{ height: 1 }} />
 
         </div>
       </div>

@@ -75,7 +75,7 @@ export function TraceLogDrawer({ entries }: TraceLogDrawerProps) {
                 background: "rgba(251,191,36,0.06)",
                 borderLeft: "2px solid rgba(251,191,36,0.50)",
                 borderRadius: "0 4px 4px 0",
-              } : undefined}
+              } : {}}
             >
               {/* 时间戳 */}
               <span className="text-2xs flex-shrink-0 mt-0.5" style={{ color: "rgba(255,255,255,0.18)", minWidth: "48px" }}>

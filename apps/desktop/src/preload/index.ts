@@ -1,15 +1,15 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 /**
- * ICEE Preload — contextBridge 安全接口 (v0.1.6)
+ * ICEE Preload — contextBridge 安全接口 (v0.3.5)
  *
  * 通过 window.icee 暴露给 renderer 进程，
  * renderer 无法直接访问 Node.js / Electron API，只能通过这里的白名单方法。
  *
- * 新增（v0.1.6）:
- *   - saveProvider / deleteProvider / listProviders  — Provider CRUD
- *   - listMcpTools / setMcpAllowedDir               — MCP 配置
- *   - runGraph 新增 attachmentsJson 第三参数         — 附件传递
+ * 新增（v0.3.5）:
+ *   - getRules / saveRules               — 用户全局 Rules CRUD
+ *   - getProjectRules / saveProjectRules — 项目级 .icee/rules.md
+ *   - onTokenStream                      — LLM 流式 token 推送
  */
 
 // ── 事件监听器类型 ─────────────────────────────
@@ -211,6 +211,44 @@ contextBridge.exposeInMainWorld("icee", {
     ipcRenderer.on("icee:agent-step", handler);
     return () => ipcRenderer.off("icee:agent-step", handler);
   },
+
+  /**
+   * 监听 LLM 流式 token 推送（打字机效果）
+   * 每收到一个 token 片段即触发回调，Run 完成后停止
+   */
+  onTokenStream: (callback: (payload: { token: string; runId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { token: string; runId: string }) =>
+      callback(payload);
+    ipcRenderer.on("icee:token-stream", handler);
+    return () => ipcRenderer.off("icee:token-stream", handler);
+  },
+
+  // ── Rules 管理 ────────────────────────────────
+
+  /**
+   * 获取用户全局 Rules（存储于 SQLite user_settings 表）
+   */
+  getRules: (): Promise<{ userRules: string }> =>
+    ipcRenderer.invoke("icee:get-rules"),
+
+  /**
+   * 保存用户全局 Rules
+   */
+  saveRules: (userRules: string): Promise<{ ok?: boolean; error?: string }> =>
+    ipcRenderer.invoke("icee:save-rules", userRules),
+
+  /**
+   * 获取项目级 Rules（.icee/rules.md）
+   * @param dirPath 项目目录路径，不传则默认 Documents
+   */
+  getProjectRules: (dirPath?: string): Promise<{ content: string; path: string; error?: string }> =>
+    ipcRenderer.invoke("icee:get-project-rules", dirPath ?? ""),
+
+  /**
+   * 保存项目级 Rules 到 .icee/rules.md
+   */
+  saveProjectRules: (dirPath: string, content: string): Promise<{ ok?: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke("icee:save-project-rules", dirPath, content),
 });
 
 // ── 向 renderer 暴露的 window.icee 类型声明 ────

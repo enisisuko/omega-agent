@@ -86,8 +86,6 @@ async function ensureEarlyDb(): Promise</* IceeDatabase */ { instance: any }> { 
   earlyDbRef.db = getDatabase(dbPath);
 
   // ── 强制列迁移：确保 api_key 和 model 列存在 ───────────────────
-  // 无论 DB 是新建还是旧文件，都执行一次 ALTER TABLE。
-  // 列已存在时 SQLite 会抛 "duplicate column name" 错误，catch 忽略即可。
   const migrations = [
     { col: "api_key", sql: "ALTER TABLE providers ADD COLUMN api_key TEXT" },
     { col: "model",   sql: "ALTER TABLE providers ADD COLUMN model TEXT" },
@@ -101,10 +99,23 @@ async function ensureEarlyDb(): Promise</* IceeDatabase */ { instance: any }> { 
       if (msg.includes("duplicate column")) {
         console.log(`[ICEE DB] Migration skipped (column already exists): providers.${m.col}`);
       } else {
-        // 真正的迁移失败（权限问题、磁盘满等），打印完整错误
         console.error(`[ICEE DB] Migration FAILED for providers.${m.col}:`, e);
       }
     }
+  }
+
+  // ── 创建 user_settings 表（存储用户 Rules 等 KV 配置）──────────
+  try {
+    earlyDbRef.db.instance.exec(`
+      CREATE TABLE IF NOT EXISTS user_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("[ICEE DB] user_settings table ready");
+  } catch (e) {
+    console.warn("[ICEE DB] Failed to create user_settings table:", e);
   }
 
   // ── 从旧 DB 路径迁移 providers 数据（一次性）──────────────────────
@@ -329,10 +340,67 @@ function registerProviderHandlers() {
   });
 
   // ── IPC: run-graph（早期占位版本，runtime 未就绪时返回明确错误）──────
-  // renderer 在窗口加载后可能立即提交任务（MCP 超时需60秒），必须提前注册；
-  // initRuntime 就绪后通过 removeHandler + re-register 覆盖为真实数据版本
   ipcMain.handle("icee:run-graph", async () => {
     return { error: "Runtime is still initializing, please wait a moment and try again." };
+  });
+
+  // ── IPC: get-rules（读取用户全局 Rules）──────────────────────────
+  ipcMain.handle("icee:get-rules", async () => {
+    try {
+      const db = await ensureEarlyDb();
+      const row = db.instance.prepare(
+        "SELECT value FROM user_settings WHERE key = 'userRules' LIMIT 1"
+      ).get() as { value: string } | undefined;
+      return { userRules: row?.value ?? "" };
+    } catch (e) {
+      console.warn("[ICEE Main] get-rules error:", e);
+      return { userRules: "" };
+    }
+  });
+
+  // ── IPC: save-rules（保存用户全局 Rules）──────────────────────────
+  ipcMain.handle("icee:save-rules", async (_event, userRules: string) => {
+    try {
+      const db = await ensureEarlyDb();
+      db.instance.prepare(`
+        INSERT OR REPLACE INTO user_settings (key, value, updated_at)
+        VALUES ('userRules', ?, CURRENT_TIMESTAMP)
+      `).run(userRules ?? "");
+      console.log("[ICEE Main] save-rules OK, length:", userRules?.length ?? 0);
+      return { ok: true };
+    } catch (e) {
+      console.error("[ICEE Main] save-rules error:", e);
+      return { error: (e as Error).message };
+    }
+  });
+
+  // ── IPC: get-project-rules（读取 .icee/rules.md）────────────────
+  ipcMain.handle("icee:get-project-rules", async (_event, dirPath: string) => {
+    try {
+      const rulesPath = path.join(dirPath || app.getPath("documents"), ".icee", "rules.md");
+      if (fs.existsSync(rulesPath)) {
+        const content = fs.readFileSync(rulesPath, "utf-8");
+        return { content, path: rulesPath };
+      }
+      return { content: "", path: rulesPath };
+    } catch (e) {
+      return { content: "", path: "", error: (e as Error).message };
+    }
+  });
+
+  // ── IPC: save-project-rules（写入 .icee/rules.md）──────────────
+  ipcMain.handle("icee:save-project-rules", async (_event, dirPath: string, content: string) => {
+    try {
+      const rulesDir = path.join(dirPath || app.getPath("documents"), ".icee");
+      fs.mkdirSync(rulesDir, { recursive: true });
+      const rulesPath = path.join(rulesDir, "rules.md");
+      fs.writeFileSync(rulesPath, content, "utf-8");
+      console.log("[ICEE Main] save-project-rules OK:", rulesPath);
+      return { ok: true, path: rulesPath };
+    } catch (e) {
+      console.error("[ICEE Main] save-project-rules error:", e);
+      return { error: (e as Error).message };
+    }
   });
 
   // ── IPC: cancel-run（早期占位，runtime 未就绪时忽略）────────────────
@@ -451,11 +519,9 @@ async function initRuntime(win: BrowserWindow) {
         message: `✅ MCP Filesystem Server connected (${defaultMcpDir})`,
       });
     } catch (mcpErr) {
-      console.warn("[ICEE Main] MCP init failed (non-fatal):", mcpErr);
-      win.webContents.send("icee:step-event", {
-        type: "SYSTEM",
-        message: `⚠️ MCP Server not available: ${(mcpErr as Error).message}`,
-      });
+      // MCP 超时/失败是非致命的，内置工具仍然正常工作
+      // 静默降级：只打印 console.warn，不推送 UI 错误事件（避免干扰用户）
+      console.warn("[ICEE Main] MCP init failed (non-fatal, builtin tools still available):", mcpErr);
     }
 
     // ── 共享 LLM invokeProvider 闭包 ──────────────────────────────
@@ -680,21 +746,58 @@ async function initRuntime(win: BrowserWindow) {
 
       if (!liveProvider) throw new Error("No LLM provider available");
 
-      console.log(`[ICEE AgentLoop] LLM call: model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.6}`);
+      console.log(`[ICEE AgentLoop] LLM call (streaming): model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.5}`);
 
-      const result = await liveProvider.generateComplete({
-        model: liveModel,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
-        stream: true,
-        ...(opts?.temperature !== undefined && { temperature: opts.temperature }),
-        ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
-      });
+      // ── 流式调用：使用 generate() AsyncIterable，实时推送 token 到 UI ──
+      // 每个 token 通过 icee:token-stream IPC 发送给 renderer（打字机效果）
+      let fullText = "";
+      let totalTokens = 0;
 
-      win.webContents.send("icee:token-update", { tokens: result.tokens, costUsd: result.costUsd });
-      return result;
+      try {
+        const stream = liveProvider.generate({
+          model: liveModel,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages,
+          ],
+          ...(opts?.temperature !== undefined && { temperature: opts.temperature }),
+          ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
+        });
+
+        for await (const event of stream) {
+          if (!event.done) {
+            // 每个 token 片段
+            fullText += event.token;
+            // 推送每个 token 到 renderer（流式打字机）
+            win.webContents.send("icee:token-stream", {
+              token: event.token,
+              runId: "current",
+            });
+          } else {
+            // 最后一个事件（done=true），包含完整的 usage
+            if (event.token) fullText += event.token;
+            totalTokens = event.usage?.totalTokens ?? totalTokens;
+          }
+        }
+      } catch (streamErr) {
+        // 流式失败时 fallback 到 generateComplete（保持向后兼容）
+        console.warn("[ICEE AgentLoop] Streaming failed, falling back to generateComplete:", streamErr);
+        const fallbackResult = await liveProvider.generateComplete({
+          model: liveModel,
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages,
+          ],
+          ...(opts?.temperature !== undefined && { temperature: opts.temperature }),
+          ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
+        });
+        fullText = fallbackResult.text;
+        totalTokens = fallbackResult.tokens;
+      }
+
+      const costUsd = 0; // token 成本估算（Ollama/本地模型免费）
+      win.webContents.send("icee:token-update", { tokens: totalTokens, costUsd });
+      return { text: fullText, tokens: totalTokens, costUsd };
     };
 
     // ── AgentLoop 工具 invoker（内置工具 + MCP 工具混合调用）────────
@@ -826,22 +929,64 @@ async function initRuntime(win: BrowserWindow) {
           } catch { /* ignore */ }
         }
 
-        // 构建 AgentLoopConfig
+        // ── 读取用户 Rules（localStorage 通过 IPC 传入，此处从 earlyDb 读取）──
+        let userRules: string | undefined;
+        let projectRules: string | undefined;
+        try {
+          const rulesDb = await ensureEarlyDb();
+          const rulesRow = rulesDb.instance.prepare(
+            "SELECT value FROM user_settings WHERE key = 'userRules' LIMIT 1"
+          ).get() as { value: string } | undefined;
+          userRules = rulesRow?.value || undefined;
+        } catch { /* ignore if table doesn't exist yet */ }
+
+        // ── 读取项目 Rules（.icee/rules.md，位于 MCP 允许目录下）──
+        try {
+          const allowedDir = mcpManager.allowedDirs[0];
+          if (allowedDir) {
+            const rulesFilePath = path.join(allowedDir, ".icee", "rules.md");
+            if (fs.existsSync(rulesFilePath)) {
+              projectRules = fs.readFileSync(rulesFilePath, "utf-8");
+              console.log(`[ICEE AgentLoop] Loaded project rules from: ${rulesFilePath}`);
+            }
+          }
+        } catch { /* ignore */ }
+
+        // ── 构建工具 Schema 列表（从 BuiltinMcpTools 动态生成，单一数据源）──
+        const builtinSchemas = Array.from(BUILTIN_TOOLS.values()).map(t => ({
+          name: t.info.name,
+          description: t.info.description,
+          inputSchema: t.info.inputSchema as {
+            type: string;
+            properties?: Record<string, { type: string; description?: string }>;
+            required?: string[];
+          },
+        }));
+        const mcpSchemas = mcpManager.connected
+          ? mcpManager.cachedTools.map((t: { name: string; description: string; inputSchema: unknown }) => ({
+              name: t.name,
+              description: t.description,
+              inputSchema: (t.inputSchema as { type: string; properties?: Record<string, { type: string; description?: string }>; required?: string[] }) ?? { type: "object" },
+            }))
+          : [];
+        const allToolSchemas = [...builtinSchemas, ...mcpSchemas];
+
+        // 构建 AgentLoopConfig（升级：更专业的角色定位，maxIterations 提升到 20）
         const loopConfig = {
           systemPrompt: lang === "zh"
-            ? "你是 ICEE 智能助手，一个强大的通用 AI Agent。\n你能回答问题、分析数据、写代码、搜索信息、创作内容。\n你的目标是高质量完成用户交给的任务。"
-            : "You are ICEE, a powerful general-purpose AI Agent.\nYou can answer questions, analyze data, write code, search information, and create content.\nYour goal is to complete user tasks with high quality.",
+            ? "你是 ICEE，一个经验丰富的 AI 软件工程师和通用助手。\n你擅长编写代码、分析数据、搜索信息、创作内容、解决复杂问题。\n你通过逐步使用工具来完成任务，每步都基于实际工具执行结果做判断。"
+            : "You are ICEE, an experienced AI software engineer and general-purpose assistant.\nYou excel at writing code, analyzing data, searching for information, creating content, and solving complex problems.\nYou complete tasks step-by-step using tools, making decisions based on actual tool execution results.",
           availableTools,
-          maxIterations: 12,
+          maxIterations: 20,
           maxTokens: 4096,
-          temperature: 0.6,
+          temperature: 0.5,
         };
 
         // 每次迭代步骤回调 → 转换为 step-event 推送到 UI
         const onStep = (rId: string, step: import("@icee/shared").AgentStep) => {
           const nodeId = `agent_step_${step.index}`;
 
-          // 通知步骤开始/更新
+          // 通知步骤开始/更新（包含 thinking 内容）
           if (step.status === "thinking") {
             win.webContents.send("icee:step-event", {
               type: "AGENT_ACT",
@@ -879,6 +1024,9 @@ async function initRuntime(win: BrowserWindow) {
           invokeTool: agentToolInvoker,
           onStep,
           lang,
+          toolSchemas: allToolSchemas,
+          userRules,
+          projectRules,
         });
 
         try {

@@ -5,8 +5,8 @@ import { mockPlugins } from "../../data/mockData.js";
 import { useLanguage } from "../../i18n/LanguageContext.js";
 import type { Locale } from "../../i18n/translations.js";
 
-// 扩展 SettingsSection 以支持 mcp 分组（局部覆盖，不修改 ui.ts 枚举）
-type ExtendedSettingsSection = SettingsSection | "mcp";
+// 扩展 SettingsSection 以支持 mcp 和 rules 分组（局部覆盖，不修改 ui.ts 枚举）
+type ExtendedSettingsSection = SettingsSection | "mcp" | "rules";
 
 /**
  * SettingsPage — 配置中心页面
@@ -37,6 +37,45 @@ export function SettingsPage({
   const [mcpConnected, setMcpConnected] = useState(false);
   const [mcpDir, setMcpDir] = useState("");
   const [mcpTools, setMcpTools] = useState<Array<{ name: string; description: string }>>([]);
+
+  // Rules 状态
+  const [userRules, setUserRules] = useState("");
+  const [projectRulesContent, setProjectRulesContent] = useState("");
+  const [projectRulesPath, setProjectRulesPath] = useState("");
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const [rulesSaveMsg, setRulesSaveMsg] = useState<"" | "saved" | "error">("");
+
+  // 加载用户 Rules（进入 rules 页时读取）
+  useEffect(() => {
+    if (activeSection !== "rules") return;
+    if (window.icee?.getRules) {
+      window.icee.getRules().then(data => {
+        setUserRules(data.userRules ?? "");
+      }).catch(console.error);
+    }
+    if (window.icee?.getProjectRules) {
+      window.icee.getProjectRules().then(data => {
+        setProjectRulesContent(data.content ?? "");
+        setProjectRulesPath(data.path ?? "");
+      }).catch(console.error);
+    }
+  }, [activeSection]);
+
+  // 保存 Rules
+  const handleSaveRules = async () => {
+    setRulesSaving(true);
+    setRulesSaveMsg("");
+    try {
+      await window.icee?.saveRules?.(userRules);
+      await window.icee?.saveProjectRules?.("", projectRulesContent);
+      setRulesSaveMsg("saved");
+    } catch {
+      setRulesSaveMsg("error");
+    } finally {
+      setRulesSaving(false);
+      setTimeout(() => setRulesSaveMsg(""), 2500);
+    }
+  };
 
   // 加载 MCP 工具列表（listMcpTools 返回单个 IceeMcpStatusResult 对象）
   useEffect(() => {
@@ -143,6 +182,18 @@ export function SettingsPage({
                 onSetDir={handleSetMcpDir}
               />
             )}
+            {activeSection === "rules" && (
+              <RulesPanel
+                userRules={userRules}
+                onUserRulesChange={setUserRules}
+                projectRulesContent={projectRulesContent}
+                onProjectRulesChange={setProjectRulesContent}
+                projectRulesPath={projectRulesPath}
+                onSave={handleSaveRules}
+                saving={rulesSaving}
+                saveMsg={rulesSaveMsg}
+              />
+            )}
             {activeSection === "appearance" && (
               <AppearancePanel />
             )}
@@ -185,6 +236,7 @@ function SettingsNav({
     { id: "providers",  label: t.settings.providers,  desc: t.settings.providersDesc },
     { id: "plugins",    label: t.settings.plugins,    desc: t.settings.pluginsDesc },
     { id: "mcp",        label: t.settings.mcp,        desc: t.settings.mcpDesc },
+    { id: "rules",      label: t.settings.rules,      desc: t.settings.rulesDesc },
     { id: "appearance", label: t.settings.appearance, desc: t.settings.appearanceDesc },
   ];
 
@@ -1101,6 +1153,125 @@ function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
         transition={{ duration: 0.15, ease: "easeOut" }}
       />
     </button>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Rules 面板（v0.3.5 新增）
+// ─────────────────────────────────────────────
+
+function RulesPanel({
+  userRules,
+  onUserRulesChange,
+  projectRulesContent,
+  onProjectRulesChange,
+  projectRulesPath,
+  onSave,
+  saving,
+  saveMsg,
+}: {
+  userRules: string;
+  onUserRulesChange: (v: string) => void;
+  projectRulesContent: string;
+  onProjectRulesChange: (v: string) => void;
+  projectRulesPath: string;
+  onSave: () => void;
+  saving: boolean;
+  saveMsg: "" | "saved" | "error";
+}) {
+  const { t } = useLanguage();
+
+  return (
+    <div>
+      <SectionHeader
+        title={t.settings.rulesTitle}
+        description={t.settings.rulesDesc2}
+      />
+
+      <div className="flex flex-col gap-6 mt-6">
+        {/* 用户全局规则 */}
+        <div>
+          <div className="mb-2">
+            <p className="text-sm font-medium" style={{ color: "rgba(255,255,255,0.72)" }}>
+              {t.settings.userRulesLabel}
+            </p>
+            <p className="text-xs mt-0.5" style={{ color: "rgba(255,255,255,0.30)" }}>
+              {t.settings.userRulesDesc}
+            </p>
+          </div>
+          <textarea
+            value={userRules}
+            onChange={e => onUserRulesChange(e.target.value)}
+            rows={8}
+            placeholder={t.settings.userRulesPlaceholder}
+            className="w-full font-mono text-xs rounded-lg px-3 py-2.5 resize-vertical outline-none"
+            style={{
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.10)",
+              color: "rgba(255,255,255,0.75)",
+              minHeight: "120px",
+              lineHeight: 1.7,
+            }}
+            onFocus={e => { (e.target as HTMLTextAreaElement).style.borderColor = "rgba(96,165,250,0.35)"; }}
+            onBlur={e => { (e.target as HTMLTextAreaElement).style.borderColor = "rgba(255,255,255,0.10)"; }}
+          />
+        </div>
+
+        {/* 项目规则 */}
+        <div>
+          <div className="mb-2">
+            <p className="text-sm font-medium" style={{ color: "rgba(255,255,255,0.72)" }}>
+              {t.settings.projectRulesLabel}
+            </p>
+            <p className="text-xs mt-0.5" style={{ color: "rgba(255,255,255,0.30)" }}>
+              {t.settings.projectRulesDesc}
+            </p>
+            {projectRulesPath && (
+              <p className="text-2xs mt-1 font-mono truncate" style={{ color: "rgba(255,255,255,0.18)" }}>
+                {projectRulesPath}
+              </p>
+            )}
+          </div>
+          <textarea
+            value={projectRulesContent}
+            onChange={e => onProjectRulesChange(e.target.value)}
+            rows={8}
+            placeholder={t.settings.projectRulesNotFound}
+            className="w-full font-mono text-xs rounded-lg px-3 py-2.5 resize-vertical outline-none"
+            style={{
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.10)",
+              color: "rgba(255,255,255,0.75)",
+              minHeight: "120px",
+              lineHeight: 1.7,
+            }}
+            onFocus={e => { (e.target as HTMLTextAreaElement).style.borderColor = "rgba(96,165,250,0.35)"; }}
+            onBlur={e => { (e.target as HTMLTextAreaElement).style.borderColor = "rgba(255,255,255,0.10)"; }}
+          />
+        </div>
+
+        {/* 保存按钮 */}
+        <div className="flex items-center gap-3">
+          <motion.button
+            onClick={onSave}
+            disabled={saving}
+            className="px-4 py-2 rounded-lg text-sm font-medium"
+            style={{
+              background: saveMsg === "saved" ? "rgba(52,211,153,0.15)" : "rgba(96,165,250,0.15)",
+              border: `1px solid ${saveMsg === "saved" ? "rgba(52,211,153,0.30)" : "rgba(96,165,250,0.25)"}`,
+              color: saveMsg === "saved" ? "rgba(52,211,153,0.90)" : "rgba(96,165,250,0.85)",
+              opacity: saving ? 0.6 : 1,
+            }}
+            whileTap={{ scale: 0.97 }}
+          >
+            {saving ? "保存中..." : saveMsg === "saved" ? `✓ ${t.settings.rulesSaved}` : saveMsg === "error" ? `✗ ${t.settings.rulesError}` : t.settings.saveRules}
+          </motion.button>
+          <p className="text-xs" style={{ color: "rgba(255,255,255,0.20)" }}>
+            保存后立即对新任务生效
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 

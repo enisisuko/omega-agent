@@ -159,6 +159,10 @@ export function App() {
   // ── Run 历史列表（Artifacts 页面数据源）────────────────────────
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
 
+  // ── 流式输出状态（打字机效果）────────────────────────────────
+  const [streamingText, setStreamingText] = useState<string>("");
+  const [isStreaming, setIsStreaming] = useState(false);
+
   // ── 真实 MCP 工具数据（Electron 下从主进程拉取；浏览器 dev fallback mockMcpTools）─────
   const [mcpToolsData, setMcpToolsData] = useState<McpToolData[]>([]);
 
@@ -206,7 +210,7 @@ export function App() {
               label: nodeLabel,
               type: nodeType,
               pipeConnected: true,
-              taskPreview,
+              ...(taskPreview !== undefined && { taskPreview }),
               state: isError
                 ? { status: "error", errorMsg: entry.message }
                 : isStart
@@ -393,7 +397,7 @@ export function App() {
      *   done     → type=LLM, status=success, output=finalAnswer
      *   error    → type=LLM, status=error
      */
-    onAgentStep: useCallback((event: import("../hooks/useIceeRuntime.js").AgentStepEvent) => {
+    onAgentStep: useCallback((event: import("./hooks/useIceeRuntime.js").AgentStepEvent) => {
       const { step } = event;
       const nodeId = `agent_step_${step.index}`;
 
@@ -437,10 +441,10 @@ export function App() {
 
       const newNode: SubagentNode = {
         id: nodeId,
-        label: nodeLabelMap[step.status],
-        type: nodeTypeMap[step.status],
+        label: nodeLabelMap[step.status] ?? nodeId,
+        type: nodeTypeMap[step.status] ?? "LLM",
         pipeConnected: true,
-        taskPreview,
+        ...(taskPreview !== undefined && { taskPreview }),
         state: nodeState,
       };
 
@@ -476,6 +480,26 @@ export function App() {
     }, [activeSessionId]),
   });
 
+  // ── 流式 token 监听（打字机效果）──────────────────────────────
+  // 每次 Run 开始时清空 streamingText，逐 token 追加；Run 完成后停止
+  useEffect(() => {
+    if (!isElectron || !window.icee?.onTokenStream) return;
+
+    const unsub = window.icee.onTokenStream(({ token }) => {
+      setIsStreaming(true);
+      setStreamingText(prev => prev + token);
+    });
+    return unsub;
+  }, [isElectron]);
+
+  // Run 完成时停止 streaming 状态（onRunCompleted 已处理 aiOutput，streaming 状态重置）
+  useEffect(() => {
+    if (currentSession.state === "completed" || currentSession.state === "failed") {
+      setIsStreaming(false);
+      setStreamingText(""); // 清空 streaming buffer（最终内容已在 session.aiOutput）
+    }
+  }, [currentSession.state]);
+
   // 启动时通过 IPC 拉取历史 Run 记录
   useEffect(() => {
     if (!isElectron || !window.icee) return;
@@ -506,11 +530,13 @@ export function App() {
     window.icee.listMcpTools().then((result) => {
       // 将 IceMcpToolInfo[] 映射为 McpToolData[]
       const mapped: McpToolData[] = (result.tools ?? []).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({
-        id: tool.name,       // 以工具名作为唯一 ID
+        id: tool.name,
         name: tool.name,
-        description: tool.description,
+        description: tool.description ?? "",
         status: result.connected ? ("available" as const) : ("offline" as const),
         type: "mcp" as const,
+        active: result.connected,
+        callCount: 0,
       }));
       setMcpToolsData(mapped);
       console.log(`[ICEE] Loaded ${mapped.length} MCP tools (connected=${result.connected})`);
@@ -769,7 +795,7 @@ export function App() {
                 status: "running",
                 startedAt: new Date().toISOString(),
                 input: message,
-                prompt: nodeId === "chat" ? `[Mock] User task: "${shortTitle}"` : undefined,
+                ...(nodeId === "chat" && { prompt: `[Mock] User task: "${shortTitle}"` }),
               };
               const newNode: SubagentNode = {
                 id: nodeId,
@@ -1078,13 +1104,13 @@ export function App() {
                       if (node.id !== nodeId) return node;
                       return {
                         ...node,
-                        state: { status: "error" as const, errorMsg: result.error },
+                        state: { status: "error" as const, errorMsg: result.error ?? "Unknown error" },
                         steps: (node.steps ?? []).map((step) =>
                           step.id === newStepId
-                            ? { ...step, status: "error" as const, errorMsg: result.error }
+                            ? { ...step, status: "error" as const, errorMsg: result.error ?? "Unknown error" }
                             : step
                         ),
-                      };
+                      } as SubagentNode;
                     }),
                   };
                 })
@@ -1186,6 +1212,8 @@ export function App() {
                     }
                     skills={mockSkills}
                     {...(currentSession.aiOutput !== undefined && { aiOutput: currentSession.aiOutput })}
+                    isStreaming={isStreaming}
+                    streamingText={streamingText}
                     executionEdges={currentSession.executionEdges}
                     rounds={currentSession.rounds ?? []}
                     onTaskSubmit={handleTaskSubmit}

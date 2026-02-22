@@ -1,6 +1,11 @@
 /**
- * window.icee — Electron contextBridge 暴露的 API 类型声明 (v0.1.6)
+ * window.icee — Electron contextBridge 暴露的 API 类型声明 (v0.3.5)
  * 与 src/preload/index.ts 保持同步
+ *
+ * v0.3.5 新增:
+ *   - onTokenStream: LLM 流式 token 推送
+ *   - getRules / saveRules: 用户全局 Rules
+ *   - getProjectRules / saveProjectRules: 项目级 .icee/rules.md
  */
 
 interface IceeStepEventPayload {
@@ -129,6 +134,20 @@ interface IceeApi {
   onTokenUpdate(callback: (payload: IceeTokenUpdatePayload) => void): () => void;
   /** 监听 AgentLoop 迭代步骤（ReAct 每步回调，用于节点卡片实时渲染） */
   onAgentStep?(callback: (payload: { runId: string; step: IceeAgentStepPayload }) => void): () => void;
+
+  /** 监听 LLM 流式 token（打字机效果，每 token 一次回调） */
+  onTokenStream?(callback: (payload: { token: string; runId: string }) => void): () => void;
+
+  // ── Rules 管理 ────────────────────────────────
+
+  /** 获取用户全局 Rules */
+  getRules?(): Promise<{ userRules: string }>;
+  /** 保存用户全局 Rules */
+  saveRules?(userRules: string): Promise<{ ok?: boolean; error?: string }>;
+  /** 获取项目级 Rules（.icee/rules.md） */
+  getProjectRules?(dirPath?: string): Promise<{ content: string; path: string; error?: string }>;
+  /** 保存项目级 Rules 到 .icee/rules.md */
+  saveProjectRules?(dirPath: string, content: string): Promise<{ ok?: boolean; path?: string; error?: string }>;
 }
 
 declare global {

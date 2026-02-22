@@ -420,6 +420,7 @@ export const mockSessions: ConversationSession[] = [
     ],
     subagents: competitorSubagents,
     executionEdges: competitorAnalysisEdges,
+    rounds: [],
     aiOutput: "竞品分析报告已完成。核心发现：Stripe 定价模式以交易抽成为主，Linear 采用席位制，Notion AI 按使用量计费。建议 ICEE 采用混合模式：基础免费 + API 调用量计费。",
   },
   {
@@ -445,6 +446,7 @@ export const mockSessions: ConversationSession[] = [
     ],
     subagents: failedSubagents,
     executionEdges: failedSearchEdges,
+    rounds: [],
   },
   {
     id: "run_Bm2sJ9cY",
@@ -468,6 +470,7 @@ export const mockSessions: ConversationSession[] = [
     ],
     subagents: docQaSubagents,
     executionEdges: docQaEdges,
+    rounds: [],
     aiOutput: "ICEE 架构文档问答完成。架构采用 Event Sourcing + 图模型，支持 Replay、Fork 和 Plugin 扩展。详细内容见 docs/architecture.md。",
   },
 ];
