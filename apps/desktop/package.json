@@ -9,9 +9,54 @@
     "build": "vite build",
     "preview": "vite preview",
     "electron:dev": "vite",
-    "electron:build": "vite build && electron-builder",
+    "electron:build": "vite build && electron-builder --win",
+    "electron:build:dir": "vite build && electron-builder --win --dir",
     "test": "vitest run",
     "lint": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.icee.agent",
+    "productName": "ICEE Agent",
+    "copyright": "Copyright © 2026 ICEE",
+    "directories": {
+      "output": "release",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@modelcontextprotocol/server-filesystem/**/*",
+      "node_modules/@modelcontextprotocol/sdk/**/*",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/nanoid/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build-resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ICEE Agent",
+      "installerHeaderIcon": "build-resources/icon.ico"
+    },
+    "extraResources": [
+      {
+        "from": "../../node_modules/@modelcontextprotocol/server-filesystem/dist",
+        "to": "mcp-servers/filesystem",
+        "filter": ["**/*"]
+      }
+    ]
   },
   "dependencies": {
     "@icee/core": "workspace:*",

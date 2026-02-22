@@ -1,6 +1,12 @@
 import { nanoid } from "nanoid";
 import { createLogger } from "../logger.js";
 import type { AgentLoopConfig, AgentStep } from "@icee/shared";
+import {
+  compressContext,
+  estimateTokens,
+  retryWithBackoff,
+  formatOutput,
+} from "../skills/AgentSkills.js";
 
 const log = createLogger("AgentLoopExecutor");
 
@@ -323,11 +329,30 @@ export class AgentLoopExecutor {
       let costUsd = 0;
 
       try {
-        // 调用 LLM
-        const result = await this.invokeLLM(systemPrompt, messages, {
-          temperature: config.temperature,
-          maxTokens: config.maxTokens,
-        });
+        // ── ContextCompressor: 上下文超出 80% token 限制时自动压缩 ────
+        const tokenBudget = Math.floor(config.maxTokens * 0.8);
+        const currentTokens = estimateTokens(messages);
+        if (currentTokens > tokenBudget) {
+          const compressed = compressContext(messages, tokenBudget, 3);
+          if (compressed.wasCompressed) {
+            log.warn(
+              { runId, iteration, savedTokens: compressed.savedTokens },
+              "[ContextCompressor] Context compressed"
+            );
+            // 将压缩后的消息替换当前消息列表
+            messages.length = 0;
+            messages.push(...compressed.messages);
+          }
+        }
+
+        // ── RetryWithBackoff: 带退避的 LLM 调用 ────────────────────────
+        const result = await retryWithBackoff(
+          () => this.invokeLLM(systemPrompt, messages, {
+            temperature: config.temperature,
+            maxTokens: config.maxTokens,
+          }),
+          { maxRetries: 2, initialDelayMs: 1000, verbose: true }
+        );
         llmResponse = result.text;
         tokens = result.tokens;
         costUsd = result.costUsd;
@@ -355,7 +380,11 @@ export class AgentLoopExecutor {
 
       // ── 情况 1：最终答案 → 结束循环 ──────────────────
       if (parsed.finalAnswer) {
-        finalAnswer = parsed.finalAnswer;
+        // ── OutputFormatter: 格式化最终输出 ─────────────
+        finalAnswer = formatOutput(parsed.finalAnswer, {
+          fixCodeBlocks: true,
+          normalizeWhitespace: true,
+        });
         continueLoop = false;
 
         const step: AgentStep = {

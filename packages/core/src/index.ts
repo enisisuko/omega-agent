@@ -19,5 +19,16 @@ export { PlanningNodeExecutor } from "./executor/builtins/PlanningNodeExecutor.j
 export { AgentLoopExecutor, buildAgentSystemPrompt } from "./executor/AgentLoopExecutor.js";
 export type { AgentLLMInvoker, AgentToolInvoker, AgentStepCallback, AgentLoopResult, ChatMessage } from "./executor/AgentLoopExecutor.js";
 
+export {
+  compressContext,
+  estimateTokens,
+  retryWithBackoff,
+  formatOutput,
+  containsCode,
+  quickSearch,
+  BUILTIN_SKILL_INFOS,
+} from "./skills/AgentSkills.js";
+export type { SkillInfo, SearchResult, RetryOptions, FormatOptions } from "./skills/AgentSkills.js";
+
 export { createErrorEnvelope, fromNativeError, IceeError } from "./errors.js";
 export { logger, createLogger } from "./logger.js";

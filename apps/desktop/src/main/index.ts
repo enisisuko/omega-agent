@@ -2,7 +2,28 @@ import { app, BrowserWindow, ipcMain, shell, dialog } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { nanoid } from "nanoid";
 import { McpClientManager } from "./mcp/McpClientManager.js";
+import { BUILTIN_TOOLS, getBuiltinToolInfos, callBuiltinTool } from "./mcp/BuiltinMcpTools.js";
+
+// ── 静态导入所有运行时模块（避免打包后动态 import 路径失效）──────────
+import { getDatabase, RunRepository, StepRepository, EventRepository } from "@icee/db";
+import {
+  GraphRuntime,
+  GraphNodeRunner,
+  NodeExecutorRegistry,
+  InputNodeExecutor,
+  OutputNodeExecutor,
+  LLMNodeExecutor,
+  ToolNodeExecutor,
+  ReflectionNodeExecutor,
+  MemoryNodeExecutor,
+  PlanningNodeExecutor,
+  AgentLoopExecutor,
+  buildAgentSystemPrompt,
+} from "@icee/core";
+import { OllamaProvider, OpenAICompatibleProvider } from "@icee/providers";
+import { GraphDefinitionSchema } from "@icee/shared";
 
 // vite-plugin-electron 将 main 打包为 ESM，需要手动重建 __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -54,7 +75,7 @@ const earlyDbRef: { db: any | null } = { db: null };
  */
 async function ensureEarlyDb(): Promise</* IceeDatabase */ { instance: any }> { // eslint-disable-line @typescript-eslint/no-explicit-any
   if (earlyDbRef.db) return earlyDbRef.db;
-  const { getDatabase } = await import("@icee/db");
+  // getDatabase 已从顶部静态导入
   const dbPath = path.join(app.getPath("userData"), "icee.db");
   console.log(`[ICEE DB] Opening database at: ${dbPath}`);
 
@@ -238,7 +259,7 @@ function registerProviderHandlers() {
     try {
       // 如果 earlyDb 已就绪则尝试从 DB 读取 run 历史
       const db = await ensureEarlyDb();
-      const RunRepository = (await import("@icee/db")).RunRepository;
+      // RunRepository 已从顶部静态导入
       const runRepo = new RunRepository(db.instance);
       return runRepo.findAll(20);
     } catch {
@@ -269,9 +290,8 @@ function registerProviderHandlers() {
       globalProviderRef.type = newRow.type;
 
       // 如果 runtime 已就绪（instance 存在），替换实例并做健康检查
+      // OllamaProvider / OpenAICompatibleProvider 已从顶部静态导入
       if (globalProviderRef.instance !== null) {
-        const { OllamaProvider } = await import("@icee/providers");
-        const { OpenAICompatibleProvider } = await import("@icee/providers");
 
         if (newRow.type === "openai-compatible" || newRow.type === "lm-studio" || newRow.type === "custom") {
           globalProviderRef.instance = new OpenAICompatibleProvider({
@@ -345,22 +365,8 @@ async function initRuntime(win: BrowserWindow) {
   globalProviderRef.win = win;
 
   try {
-    // 动态导入运行时（避免影响窗口启动速度）
-    const { RunRepository, StepRepository, EventRepository } =
-      await import("@icee/db");
-    const {
-      GraphRuntime,
-      GraphNodeRunner,
-      NodeExecutorRegistry,
-      InputNodeExecutor,
-      OutputNodeExecutor,
-      LLMNodeExecutor,
-      ToolNodeExecutor,
-      MemoryNodeExecutor,
-      ReflectionNodeExecutor,
-      PlanningNodeExecutor,
-    } = await import("@icee/core");
-    const { OllamaProvider, OpenAICompatibleProvider } = await import("@icee/providers");
+    // 所有运行时模块已从文件顶部静态导入，无需动态 import
+    // （静态 import 在打包后路径稳定，不会因 asar 路径问题失败）
 
     // 复用 earlyDbRef 中已初始化的 DB（由 registerProviderHandlers 触发的首次 IPC 调用时打开）
     // 若 earlyDbRef.db 还没初始化（极少数情况，如 runtime 先于 provider IPC 被调用），则现在打开
@@ -691,25 +697,50 @@ async function initRuntime(win: BrowserWindow) {
       return result;
     };
 
-    // ── AgentLoop 工具 invoker（调用 MCP 工具）─────────────────────
+    // ── AgentLoop 工具 invoker（内置工具 + MCP 工具混合调用）────────
+    // 优先级：1. 内置工具（BUILTIN_TOOLS）2. MCP filesystem server
     const agentToolInvoker = async (toolName: string, toolInput: unknown): Promise<string> => {
+      const inputRecord = (toolInput as Record<string, unknown>) ?? {};
+
       win.webContents.send("icee:step-event", {
         type: "MCP_CALL",
         message: `🔧 [AgentLoop] Tool: ${toolName}`,
         details: JSON.stringify(toolInput).slice(0, 120),
       });
 
+      // ── 1. 尝试内置工具（web_search / http_fetch / browser_open / clipboard_read / clipboard_write）──
+      if (BUILTIN_TOOLS.has(toolName)) {
+        console.log(`[ICEE AgentLoop] Using builtin tool: ${toolName}`);
+        try {
+          const result = await callBuiltinTool(toolName, inputRecord);
+          win.webContents.send("icee:step-event", {
+            type: "MCP_CALL",
+            message: `✓ [AgentLoop] Builtin "${toolName}" done`,
+            details: result.slice(0, 120),
+          });
+          return result;
+        } catch (err) {
+          const msg = `Builtin tool "${toolName}" failed: ${(err as Error).message}`;
+          win.webContents.send("icee:step-event", {
+            type: "SYSTEM",
+            message: `❌ [AgentLoop] ${msg}`,
+          });
+          return msg;
+        }
+      }
+
+      // ── 2. 尝试 MCP filesystem server ─────────────────────────────────
       if (!mcpManager.connected) {
         console.warn(`[ICEE AgentLoop] MCP not connected, tool "${toolName}" unavailable`);
-        return `[MCP Unavailable] Tool "${toolName}" requires MCP connection.`;
+        return `[Tool Unavailable] Tool "${toolName}" is not available. Available builtin tools: ${Array.from(BUILTIN_TOOLS.keys()).join(", ")}`;
       }
 
       try {
-        const result = await mcpManager.callTool(toolName, toolInput as Record<string, unknown>);
+        const result = await mcpManager.callTool(toolName, inputRecord);
         const resultStr = typeof result === "string" ? result : JSON.stringify(result);
         win.webContents.send("icee:step-event", {
           type: "MCP_CALL",
-          message: `✓ [AgentLoop] Tool "${toolName}" done`,
+          message: `✓ [AgentLoop] MCP Tool "${toolName}" done`,
           details: resultStr.slice(0, 120),
         });
         return resultStr;
@@ -745,17 +776,22 @@ async function initRuntime(win: BrowserWindow) {
           return { error: "Invalid task JSON" };
         }
 
-        const { AgentLoopExecutor, buildAgentSystemPrompt } = await import("@icee/core/executor/AgentLoopExecutor.js");
-        const { nanoid } = await import("nanoid");
+        // AgentLoopExecutor / buildAgentSystemPrompt / nanoid 已从顶部静态导入
 
         const runId = nanoid();
         const lang = taskOpts.lang ?? "zh";
 
-        // 获取当前可用的 MCP 工具列表
+        // 获取工具列表：内置工具（始终可用）+ MCP filesystem 工具（连接时可用）
+        const builtinToolNames = Array.from(BUILTIN_TOOLS.keys()); // 内置工具始终可用
         const mcpTools = mcpManager.connected
-          ? mcpManager.getTools().map((t: { name: string }) => t.name)
+          ? mcpManager.cachedTools.map((t: { name: string }) => t.name)
           : [];
-        const availableTools = taskOpts.availableTools ?? mcpTools;
+        const availableTools = taskOpts.availableTools ?? [
+          ...builtinToolNames,
+          ...mcpTools,
+        ];
+        console.log(`[ICEE AgentLoop] Builtin tools: [${builtinToolNames.join(",")}]`);
+        console.log(`[ICEE AgentLoop] MCP tools: [${mcpTools.join(",")}]`);
 
         console.log(`[ICEE AgentLoop] Starting run ${runId}, lang=${lang}, tools=[${availableTools.join(",")}]`);
 
@@ -892,7 +928,7 @@ async function initRuntime(win: BrowserWindow) {
         inputJson: string,
         _attachmentsJson?: string  // 附件列表（JSON 字符串）
       ) => {
-        const { GraphDefinitionSchema } = await import("@icee/shared");
+        // GraphDefinitionSchema 已从顶部静态导入
 
         let graph;
         try {
@@ -977,7 +1013,7 @@ async function initRuntime(win: BrowserWindow) {
       "icee:fork-run",
       async (_event, parentRunId: string, fromStepId: string, graphJson: string, inputOverrideJson?: string) => {
         try {
-          const { GraphDefinitionSchema } = await import("@icee/shared");
+          // GraphDefinitionSchema 已从顶部静态导入
 
           let graph;
           try {
@@ -1019,13 +1055,18 @@ async function initRuntime(win: BrowserWindow) {
     // ── IPC: list-mcp-tools（runtime 就绪后覆盖早期注册的空实现）──────
     ipcMain.removeHandler("icee:list-mcp-tools");
     ipcMain.handle("icee:list-mcp-tools", async () => {
-      const tools = mcpManager.connected
+      // 刷新 MCP filesystem 工具（如果已连接），否则用缓存
+      const mcpTools = mcpManager.connected
         ? await mcpManager.refreshTools()
         : mcpManager.cachedTools;
+      // 合并内置工具（始终返回，不依赖 MCP 连接状态）
+      const builtinTools = getBuiltinToolInfos();
       return {
         connected: mcpManager.connected,
         allowedDir: mcpManager.allowedDirs[0] ?? "",
-        tools,
+        tools: [...builtinTools, ...mcpTools],
+        builtinCount: builtinTools.length,
+        mcpCount: mcpTools.length,
       };
     });
 
