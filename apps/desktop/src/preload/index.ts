@@ -62,6 +62,18 @@ type McpStatusPayload = {
   error?: string;
 };
 
+/** AgentLoop 单步迭代数据（对应 AgentStep 类型） */
+type AgentStepPayload = {
+  index: number;
+  thought?: string;
+  toolName?: string;
+  toolInput?: unknown;
+  observation?: string;
+  finalAnswer?: string;
+  status: "thinking" | "acting" | "observing" | "done" | "error";
+  tokens: number;
+};
+
 // ── 暴露 API ───────────────────────────────────
 contextBridge.exposeInMainWorld("icee", {
   // ── Graph 运行时 ─────────────────────────────
@@ -75,6 +87,14 @@ contextBridge.exposeInMainWorld("icee", {
    */
   runGraph: (graphJson: string, inputJson: string, attachmentsJson?: string) =>
     ipcRenderer.invoke("icee:run-graph", graphJson, inputJson, attachmentsJson),
+
+  /**
+   * 运行 ReAct 动态 Agent 循环（Cline 风格，步骤数由 LLM 动态决定）
+   * @param taskJson  JSON 字符串：{ task, lang?, availableTools?, attachmentsJson? }
+   * @returns { runId } 或 { error }
+   */
+  runAgentLoop: (taskJson: string) =>
+    ipcRenderer.invoke("icee:run-agent-loop", taskJson),
 
   /**
    * 取消正在运行的 Run
@@ -180,6 +200,16 @@ contextBridge.exposeInMainWorld("icee", {
       callback(payload);
     ipcRenderer.on("icee:token-update", handler);
     return () => ipcRenderer.off("icee:token-update", handler);
+  },
+
+  /**
+   * 监听 AgentLoop 每步迭代结果（用于 UI 实时渲染 ReAct 步骤节点）
+   */
+  onAgentStep: (callback: (payload: { runId: string; step: AgentStepPayload }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { runId: string; step: AgentStepPayload }) =>
+      callback(payload);
+    ipcRenderer.on("icee:agent-step", handler);
+    return () => ipcRenderer.off("icee:agent-step", handler);
   },
 });
 

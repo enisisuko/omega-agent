@@ -16,5 +16,8 @@ export { ReflectionNodeExecutor } from "./executor/builtins/ReflectionNodeExecut
 export { MemoryNodeExecutor } from "./executor/builtins/MemoryNodeExecutor.js";
 export { PlanningNodeExecutor } from "./executor/builtins/PlanningNodeExecutor.js";
 
+export { AgentLoopExecutor, buildAgentSystemPrompt } from "./executor/AgentLoopExecutor.js";
+export type { AgentLLMInvoker, AgentToolInvoker, AgentStepCallback, AgentLoopResult, ChatMessage } from "./executor/AgentLoopExecutor.js";
+
 export { createErrorEnvelope, fromNativeError, IceeError } from "./errors.js";
 export { logger, createLogger } from "./logger.js";

@@ -645,6 +645,241 @@ async function initRuntime(win: BrowserWindow) {
       }
     );
 
+    // ── AgentLoop LLM invoker（供 AgentLoopExecutor 使用，多轮对话风格）──
+    // 与 sharedInvokeProvider 不同：接受完整的 ChatMessage[] 数组，支持 ReAct 上下文
+    const agentLLMInvoker = async (
+      systemPrompt: string,
+      messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+      opts?: { temperature?: number; maxTokens?: number }
+    ): Promise<{ text: string; tokens: number; costUsd: number }> => {
+      // 实时从 DB 获取最新 provider（与 sharedInvokeProvider 逻辑相同）
+      let liveProvider = globalProviderRef.instance;
+      let liveModel = globalProviderRef.model;
+
+      try {
+        const liveDb = await ensureEarlyDb();
+        const liveRow = getEffectiveDefaultProvider(liveDb);
+        if (liveRow) {
+          liveModel = liveRow.model ?? liveModel;
+          const liveUrl = liveRow.base_url;
+          if (liveUrl !== globalProviderRef.url || liveRow.type !== globalProviderRef.type) {
+            if (liveRow.type === "openai-compatible" || liveRow.type === "lm-studio" || liveRow.type === "custom") {
+              liveProvider = new OpenAICompatibleProvider({ id: liveRow.id, name: liveRow.name, baseUrl: liveUrl, ...(liveRow.api_key && { apiKey: liveRow.api_key }) });
+            } else {
+              liveProvider = new OllamaProvider({ baseUrl: liveUrl });
+            }
+          }
+        }
+      } catch { /* 使用缓存的 provider */ }
+
+      if (!liveProvider) throw new Error("No LLM provider available");
+
+      console.log(`[ICEE AgentLoop] LLM call: model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.6}`);
+
+      const result = await liveProvider.generateComplete({
+        model: liveModel,
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...messages,
+        ],
+        stream: true,
+        ...(opts?.temperature !== undefined && { temperature: opts.temperature }),
+        ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
+      });
+
+      win.webContents.send("icee:token-update", { tokens: result.tokens, costUsd: result.costUsd });
+      return result;
+    };
+
+    // ── AgentLoop 工具 invoker（调用 MCP 工具）─────────────────────
+    const agentToolInvoker = async (toolName: string, toolInput: unknown): Promise<string> => {
+      win.webContents.send("icee:step-event", {
+        type: "MCP_CALL",
+        message: `🔧 [AgentLoop] Tool: ${toolName}`,
+        details: JSON.stringify(toolInput).slice(0, 120),
+      });
+
+      if (!mcpManager.connected) {
+        console.warn(`[ICEE AgentLoop] MCP not connected, tool "${toolName}" unavailable`);
+        return `[MCP Unavailable] Tool "${toolName}" requires MCP connection.`;
+      }
+
+      try {
+        const result = await mcpManager.callTool(toolName, toolInput as Record<string, unknown>);
+        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+        win.webContents.send("icee:step-event", {
+          type: "MCP_CALL",
+          message: `✓ [AgentLoop] Tool "${toolName}" done`,
+          details: resultStr.slice(0, 120),
+        });
+        return resultStr;
+      } catch (err) {
+        const msg = `Tool "${toolName}" failed: ${(err as Error).message}`;
+        win.webContents.send("icee:step-event", {
+          type: "SYSTEM",
+          message: `❌ [AgentLoop] ${msg}`,
+        });
+        return msg;
+      }
+    };
+
+    // ── IPC: run-agent-loop ─────────────────────────────────────────
+    // 新的 ReAct 动态循环 IPC handler（替代固定图 run-graph）
+    // 接受任务描述字符串，由 AgentLoopExecutor 动态决定执行步骤
+    ipcMain.removeHandler("icee:run-agent-loop");
+    ipcMain.handle(
+      "icee:run-agent-loop",
+      async (
+        _event,
+        taskJson: string,        // { task: string, lang?: "zh"|"en", attachmentsJson?: string }
+      ) => {
+        let taskOpts: {
+          task: string;
+          lang?: "zh" | "en";
+          availableTools?: string[];
+          attachmentsJson?: string;
+        };
+        try {
+          taskOpts = JSON.parse(taskJson);
+        } catch {
+          return { error: "Invalid task JSON" };
+        }
+
+        const { AgentLoopExecutor, buildAgentSystemPrompt } = await import("@icee/core/executor/AgentLoopExecutor.js");
+        const { nanoid } = await import("nanoid");
+
+        const runId = nanoid();
+        const lang = taskOpts.lang ?? "zh";
+
+        // 获取当前可用的 MCP 工具列表
+        const mcpTools = mcpManager.connected
+          ? mcpManager.getTools().map((t: { name: string }) => t.name)
+          : [];
+        const availableTools = taskOpts.availableTools ?? mcpTools;
+
+        console.log(`[ICEE AgentLoop] Starting run ${runId}, lang=${lang}, tools=[${availableTools.join(",")}]`);
+
+        // 通知 UI：Run 开始
+        win.webContents.send("icee:step-event", {
+          type: "SYSTEM",
+          message: `Run started: ${runId}`,
+        });
+
+        // 处理附件
+        let task = taskOpts.task;
+        if (taskOpts.attachmentsJson) {
+          try {
+            const attachments: AttachmentItem[] = JSON.parse(taskOpts.attachmentsJson);
+            if (attachments.length > 0) {
+              const fileCtxParts: string[] = [];
+              for (const att of attachments) {
+                if (att.type === "file") {
+                  const base64 = att.dataUrl.split(",")[1] ?? "";
+                  const text = Buffer.from(base64, "base64").toString("utf-8");
+                  fileCtxParts.push(`[附件文件: ${att.name}]\n${text.slice(0, 8000)}`);
+                }
+              }
+              if (fileCtxParts.length > 0) {
+                task += `\n\n---\n## 附件内容\n${fileCtxParts.join("\n\n")}`;
+              }
+              win.webContents.send("icee:step-event", {
+                type: "SYSTEM",
+                message: `📎 Attachments: ${attachments.length} file(s)`,
+              });
+            }
+          } catch { /* ignore */ }
+        }
+
+        // 构建 AgentLoopConfig
+        const loopConfig = {
+          systemPrompt: lang === "zh"
+            ? "你是 ICEE 智能助手，一个强大的通用 AI Agent。\n你能回答问题、分析数据、写代码、搜索信息、创作内容。\n你的目标是高质量完成用户交给的任务。"
+            : "You are ICEE, a powerful general-purpose AI Agent.\nYou can answer questions, analyze data, write code, search information, and create content.\nYour goal is to complete user tasks with high quality.",
+          availableTools,
+          maxIterations: 12,
+          maxTokens: 4096,
+          temperature: 0.6,
+        };
+
+        // 每次迭代步骤回调 → 转换为 step-event 推送到 UI
+        const onStep = (rId: string, step: import("@icee/shared").AgentStep) => {
+          const nodeId = `agent_step_${step.index}`;
+
+          // 通知步骤开始/更新
+          if (step.status === "thinking") {
+            win.webContents.send("icee:step-event", {
+              type: "AGENT_ACT",
+              message: `→ [思考] 迭代 ${step.index}${step.thought ? ": " + step.thought.slice(0, 60) : ""}`,
+              nodeId,
+            });
+          } else if (step.status === "acting") {
+            win.webContents.send("icee:step-event", {
+              type: "AGENT_ACT",
+              message: `→ [工具] ${step.toolName}`,
+              nodeId,
+            });
+          } else if (step.status === "observing") {
+            win.webContents.send("icee:step-event", {
+              type: "MCP_CALL",
+              message: `✓ [观察] ${step.toolName}: ${(step.observation ?? "").slice(0, 80)}`,
+              nodeId,
+            });
+          } else if (step.status === "done") {
+            win.webContents.send("icee:step-event", {
+              type: "AGENT_ACT",
+              message: `✓ 步骤 ${step.index} 完成`,
+              nodeId,
+            });
+          }
+
+          // 同时把步骤详情通过 icee:agent-step 推送（UI 用于节点卡片渲染）
+          win.webContents.send("icee:agent-step", { runId: rId, step });
+        };
+
+        const executor = new AgentLoopExecutor({
+          runId,
+          config: loopConfig,
+          invokeLLM: agentLLMInvoker,
+          invokeTool: agentToolInvoker,
+          onStep,
+          lang,
+        });
+
+        try {
+          const result = await executor.execute(task);
+
+          // 完成通知
+          win.webContents.send("icee:step-event", {
+            type: "SYSTEM",
+            message: `Run COMPLETED — ${result.iterations} iterations / ${result.totalTokens} tokens`,
+          });
+          win.webContents.send("icee:run-completed", {
+            state: "COMPLETED",
+            durationMs: 0,
+            totalTokens: result.totalTokens,
+            totalCostUsd: result.totalCostUsd,
+            output: result.finalAnswer,
+          });
+
+          return { runId, ok: true };
+        } catch (e) {
+          const msg = (e as Error).message;
+          win.webContents.send("icee:step-event", {
+            type: "SYSTEM",
+            message: `❌ Run failed: ${msg}`,
+          });
+          win.webContents.send("icee:run-completed", {
+            state: "FAILED",
+            durationMs: 0,
+            totalTokens: 0,
+            totalCostUsd: 0,
+            output: undefined,
+          });
+          return { error: msg };
+        }
+      }
+    );
+
     // ── IPC: run-graph ─────────────────────────
     // 接收 renderer 的任务提交请求（新增附件和 providerId 参数）
     // 移除早期占位 handler，替换为真实实现

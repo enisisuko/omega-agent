@@ -10,7 +10,7 @@ export * from "./enums.js";
 
 // Schema 定义和推导类型
 export * from "./schemas/error.js";
-export * from "./schemas/node.js";
+export * from "./schemas/node.js";  // AgentLoopConfig, AgentStep, LLMNodeConfig 等
 export * from "./schemas/graph.js";
 export * from "./schemas/run.js";
 export * from "./schemas/plugin.js";

@@ -33,6 +33,8 @@ export const NodeType = {
   PLANNING: "PLANNING",
   REFLECTION: "REFLECTION",
   MEMORY: "MEMORY",
+  /** ReAct 动态循环节点（Cline 风格：Thought→Action→Observation 反复迭代直到完成） */
+  AGENT_LOOP: "AGENT_LOOP",
 } as const;
 export type NodeType = (typeof NodeType)[keyof typeof NodeType];
 

@@ -60,11 +60,30 @@ interface IceeMcpStatusResult {
   error?: string;
 }
 
+/** AgentLoop 单步迭代数据 */
+interface IceeAgentStepPayload {
+  index: number;
+  thought?: string;
+  toolName?: string;
+  toolInput?: unknown;
+  observation?: string;
+  finalAnswer?: string;
+  status: "thinking" | "acting" | "observing" | "done" | "error";
+  tokens: number;
+}
+
 interface IceeApi {
   // ── Graph 运行时 ─────────────────────────────
 
   /** 运行一个 Graph（attachmentsJson 为附件数组的 JSON 字符串） */
   runGraph(graphJson: string, inputJson: string, attachmentsJson?: string): Promise<IceeRunGraphResult>;
+
+  /**
+   * 运行 ReAct 动态 Agent 循环（Cline 风格，步骤数由 LLM 自主决定）
+   * taskJson: { task, lang?, availableTools?, attachmentsJson? }
+   */
+  runAgentLoop?(taskJson: string): Promise<IceeRunGraphResult>;
+
   /** 取消正在运行的 Run */
   cancelRun(runId: string): Promise<{ ok: boolean }>;
   /**
@@ -108,6 +127,8 @@ interface IceeApi {
   onRunCompleted(callback: (payload: IceeRunCompletedPayload) => void): () => void;
   /** 监听 Token 用量更新（返回取消函数） */
   onTokenUpdate(callback: (payload: IceeTokenUpdatePayload) => void): () => void;
+  /** 监听 AgentLoop 迭代步骤（ReAct 每步回调，用于节点卡片实时渲染） */
+  onAgentStep?(callback: (payload: { runId: string; step: IceeAgentStepPayload }) => void): () => void;
 }
 
 declare global {

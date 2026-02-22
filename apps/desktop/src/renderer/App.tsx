@@ -381,6 +381,99 @@ export function App() {
       console.log(`[ICEE] Ollama ${healthy ? "✅" : "❌"} @ ${url}`);
       setOllamaConnected(healthy);
     }, []),
+
+    /**
+     * AgentLoop 每步迭代回调（ReAct 模式）
+     * 把每次 LLM 迭代步骤转换为 SubagentNode，实时更新当前轮次的 subagents
+     *
+     * 映射规则：
+     *   thinking → type=LLM, status=running, taskPreview=thought
+     *   acting   → type=TOOL, status=running, taskPreview=toolName
+     *   observing → type=MEMORY, status=running, taskPreview=observation摘要
+     *   done     → type=LLM, status=success, output=finalAnswer
+     *   error    → type=LLM, status=error
+     */
+    onAgentStep: useCallback((event: import("../hooks/useIceeRuntime.js").AgentStepEvent) => {
+      const { step } = event;
+      const nodeId = `agent_step_${step.index}`;
+
+      // 状态映射
+      const nodeTypeMap: Record<typeof step.status, SubagentNode["type"]> = {
+        thinking:  "LLM",
+        acting:    "TOOL",
+        observing: "MEMORY",
+        done:      "REFLECTION",
+        error:     "LLM",
+      };
+
+      const nodeLabelMap: Record<typeof step.status, string> = {
+        thinking:  `思考 #${step.index}`,
+        acting:    `工具: ${step.toolName ?? "..."}`,
+        observing: `观察 #${step.index}`,
+        done:      `完成 #${step.index}`,
+        error:     `错误 #${step.index}`,
+      };
+
+      const nodeState: SubagentNode["state"] =
+        step.status === "done"
+          ? { status: "success", output: step.finalAnswer ?? "Done", tokens: step.tokens }
+          : step.status === "error"
+          ? { status: "error", errorMsg: step.thought ?? "Error" }
+          : {
+              status: "running",
+              currentTask: step.status === "acting"
+                ? `调用工具: ${step.toolName}`
+                : step.status === "observing"
+                ? `观察结果: ${(step.observation ?? "").slice(0, 60)}`
+                : step.thought?.slice(0, 80) ?? "思考中...",
+            };
+
+      const taskPreview =
+        step.status === "thinking" ? step.thought?.slice(0, 100)
+        : step.status === "acting" ? `调用 ${step.toolName} 工具`
+        : step.status === "observing" ? `获得工具结果，继续分析`
+        : step.status === "done" ? "任务已完成，输出最终答案"
+        : undefined;
+
+      const newNode: SubagentNode = {
+        id: nodeId,
+        label: nodeLabelMap[step.status],
+        type: nodeTypeMap[step.status],
+        pipeConnected: true,
+        taskPreview,
+        state: nodeState,
+      };
+
+      console.log(`[ICEE AgentStep] step=${step.index} status=${step.status} nodeId=${nodeId}`);
+
+      setSessions((prev) =>
+        prev.map((s) => {
+          if (s.id !== activeSessionId) return s;
+
+          // 更新最新轮（rounds 最后一项）的 subagents
+          const rounds = s.rounds ?? [];
+          if (rounds.length === 0) return s;
+
+          const lastRoundIdx = rounds.length - 1;
+          const lastRound = rounds[lastRoundIdx]!;
+
+          // 查找是否已存在同 nodeId 的节点（同一步骤的状态更新）
+          const existingIdx = lastRound.subagents.findIndex(n => n.id === nodeId);
+          const updatedSubagents = existingIdx >= 0
+            ? lastRound.subagents.map((n, i) => i === existingIdx ? newNode : n)
+            : [...lastRound.subagents, newNode];
+
+          const updatedRound = { ...lastRound, subagents: updatedSubagents };
+          const updatedRounds = [...rounds.slice(0, lastRoundIdx), updatedRound];
+
+          return {
+            ...s,
+            rounds: updatedRounds,
+            subagents: updatedSubagents,
+          };
+        })
+      );
+    }, [activeSessionId]),
   });
 
   // 启动时通过 IPC 拉取历史 Run 记录
@@ -507,115 +600,32 @@ export function App() {
     setActiveSessionId(sessionId);
   }, []);
 
-  /** 用户提交新任务（含附件列表和可选模型覆盖） */
+  /**
+   * 用户提交新任务（含附件列表和可选模型覆盖）
+   *
+   * v0.3.3 改造：改为调用 runAgentLoop（ReAct 动态循环）
+   * - 不再传送固定的 6 节点 graphJson
+   * - 步骤数由 LLM 自主决定（Cline 风格），每步都实时更新 UI
+   * - 每次迭代步骤通过 onAgentStep IPC 推送到 UI，映射为 SubagentNode
+   */
   const handleTaskSubmit = useCallback(
-    async (task: string, attachments: AttachmentItem[] = [], modelOverride?: string) => {
-      const sid = activeSessionId; // 闭包捕获，防止切换会话后污染
+    async (task: string, attachments: AttachmentItem[] = [], _modelOverride?: string) => {
+      const sid = activeSessionId;
       const timestamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
-      // 任务标题：优先用文字，若纯图片则提示
       const titleBase = task.trim() || (attachments.length > 0 ? `[${attachments.length} attachment(s)]` : "New task");
       const shortTitle = titleBase.length > 40 ? titleBase.slice(0, 40) + "…" : titleBase;
-
-      // 先更新 UI 为 running 状态
       const tempRunId = genId();
 
-      // 预先构造 graphJson（用于解析 edges），Electron 和 mock 共用此结构
-      // 6节点链式思考图：Input → Planner → Context/Executor → Reflector → Output
-      // 提示词根据当前语言（t.agentPrompts）自动切换中英文
-      const ap = t.agentPrompts;
-      const graphJson = JSON.stringify({
-        id: `session-${sid}`,
-        name: shortTitle,
-        version: "1.0.0",
-        description: task,
-        nodes: [
-          // 1. 输入节点
-          { id: "input", type: "INPUT", label: "User Input", version: "1.0.0", cache: "no-cache" },
-          // 2. 规划节点（PLANNING）— 把任务分解为3步
-          {
-            id: "plan",
-            type: "PLANNING",
-            label: "Planner",
-            version: "1.0.0",
-            cache: "no-cache",
-            config: {
-              systemPrompt: ap.planner.systemPrompt,
-              promptTemplate: ap.planner.promptTemplate,
-              temperature: 0.5,
-              maxTokens: 300,
-            },
-          },
-          // 3. 上下文节点（MEMORY）— 提取技术要点，接收 plan 的输出
-          {
-            id: "decompose",
-            type: "MEMORY",
-            label: "Context",
-            version: "1.0.0",
-            cache: "no-cache",
-            config: {
-              systemPrompt: ap.context.systemPrompt,
-              promptTemplate: ap.context.promptTemplate,
-              temperature: 0.4,
-              maxTokens: 300,
-            },
-          },
-          // 4. 执行节点（LLM）— 根据计划生成完整内容，接收 decompose 的输出
-          {
-            id: "execute",
-            type: "LLM",
-            label: "Executor",
-            version: "1.0.0",
-            cache: "no-cache",
-            config: {
-              systemPrompt: ap.executor.systemPrompt,
-              promptTemplate: ap.executor.promptTemplate,
-              temperature: 0.7,
-              maxTokens: 2048,
-              // 用户手动选择的模型（未选时 fallback 到 globalProviderRef）
-              ...(modelOverride && { model: modelOverride }),
-            },
-          },
-          // 5. 反思节点（REFLECTION）— 审查整合输出，接收 execute 的输出
-          {
-            id: "reflect",
-            type: "REFLECTION",
-            label: "Reflector",
-            version: "1.0.0",
-            cache: "no-cache",
-            config: {
-              systemPrompt: ap.reflector.systemPrompt,
-              promptTemplate: ap.reflector.promptTemplate,
-              temperature: 0.4,
-              maxTokens: 2048,
-            },
-          },
-          // 6. 输出节点
-          { id: "output", type: "OUTPUT", label: "Response", version: "1.0.0", cache: "no-cache" },
-        ],
-        edges: [
-          { id: "e1", source: "input",     target: "plan"      }, // 输入 → 规划
-          { id: "e2", source: "plan",      target: "decompose"  }, // 规划 → 上下文分析
-          { id: "e3", source: "decompose", target: "execute"    }, // 上下文 → 执行
-          { id: "e4", source: "execute",   target: "reflect"    }, // 执行 → 反思
-          { id: "e5", source: "reflect",   target: "output"     }, // 反思 → 输出
-        ],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        author: "ICEE UI",
-        tags: ["ui", "chat", "chain-of-thought"],
-      });
+      // AgentLoop 不需要 graphJson，只需要空 edges 占位
+      const initialEdges: ExecutionEdge[] = [];
 
-      // 从 graphJson 解析出初始边（全部 pending）
-      const initialEdges = parseEdgesFromGraph(graphJson);
-
-      // 构造新一轮的 ExecutionRound
+      // 构造新一轮 ExecutionRound（无 edges / nodes，动态填充）
       const newRound: ExecutionRound = {
-        roundIndex: 0, // 下面用 sessions 当前值计算实际轮次
+        roundIndex: 0,
         task,
         submittedAt: new Date().toISOString(),
         executionEdges: initialEdges,
         subagents: [],
-        graphJson,
         state: "running" as const,
       };
 
@@ -633,7 +643,7 @@ export function App() {
               progress: 2,
               totalTokens: 0,
               totalCostUsd: 0,
-              activeAgents: mockSubagents.length,
+              activeAgents: 1,
               runId: tempRunId,
               state: "running" as const,
             },
@@ -646,23 +656,29 @@ export function App() {
                 message: `Task submitted: "${shortTitle}"`,
               },
             ],
-            // 多轮：把新轮追加到 rounds 列表
             rounds: [...(s.rounds ?? []), round],
-            // 向下兼容：同步更新顶层字段（最新轮的数据）
             executionEdges: initialEdges,
             subagents: [],
-            graphJson,
           };
         })
       );
 
-      // ── Electron 环境：走真实 IPC ──────────────
+      // ── Electron 环境：调用 runAgentLoop IPC ──────────────
       if (isElectron) {
-        // graphJson 已在上方构造（与 initialEdges 共用）
-        const inputJson = JSON.stringify({ query: task });
-        // 将附件序列化后传给主进程处理
+        const lang = t === t ? (navigator.language.startsWith("zh") ? "zh" : "en") : "zh";
         const attachmentsJson = attachments.length > 0 ? JSON.stringify(attachments) : undefined;
-        const result = await runGraph(graphJson, inputJson, attachmentsJson);
+        const taskJson = JSON.stringify({
+          task,
+          lang,
+          ...(attachmentsJson && { attachmentsJson }),
+        });
+
+        // 使用 runAgentLoop（若已有则使用，否则降级 runGraph）
+        const runFn = window.icee?.runAgentLoop
+          ? (j: string) => window.icee!.runAgentLoop!(j)
+          : async () => ({ error: "runAgentLoop not available" });
+
+        const result = await runFn(taskJson);
 
         if (result?.error) {
           // 运行失败，切换为 failed 状态

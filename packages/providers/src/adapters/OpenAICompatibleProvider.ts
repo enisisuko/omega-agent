@@ -48,9 +48,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
       stream: true,
     });
 
-    log.debug({ model: request.model, baseUrl: this.config.baseUrl }, "Sending request to OpenAI-compatible API");
+    log.debug({ model: request.model, baseUrl: this.normalizedBaseUrl }, "Sending request to OpenAI-compatible API");
 
-    const response = await fetch(`${this.config.baseUrl}/chat/completions`, {
+    const response = await fetch(`${this.normalizedBaseUrl}/chat/completions`, {
       method: "POST",
       headers,
       body,
@@ -167,13 +167,18 @@ export class OpenAICompatibleProvider implements LLMProvider {
     };
   }
 
+  /** 获取标准化后的 base URL（末尾含 /v1） */
+  private get normalizedBaseUrl(): string {
+    return this.config.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/v1";
+  }
+
   async listModels(): Promise<string[]> {
     try {
       const headers: Record<string, string> = {};
       if (this.config.apiKey) {
         headers["Authorization"] = `Bearer ${this.config.apiKey}`;
       }
-      const response = await fetch(`${this.config.baseUrl}/models`, { headers });
+      const response = await fetch(`${this.normalizedBaseUrl}/models`, { headers });
       if (!response.ok) return [];
       const json = await response.json() as { data?: Array<{ id: string }> };
       return json.data?.map(m => m.id) ?? [];

@@ -1,6 +1,21 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { TraceLogEntry } from "../types/ui.js";
 
+/** AgentLoop 单步迭代数据（来自 IPC 推送） */
+export interface AgentStepEvent {
+  runId: string;
+  step: {
+    index: number;
+    thought?: string;
+    toolName?: string;
+    toolInput?: unknown;
+    observation?: string;
+    finalAnswer?: string;
+    status: "thinking" | "acting" | "observing" | "done" | "error";
+    tokens: number;
+  };
+}
+
 /**
  * useIceeRuntime — Electron IPC 运行时桥接 Hook
  *
@@ -12,6 +27,7 @@ import type { TraceLogEntry } from "../types/ui.js";
  *   - 监听 StepEvent（TraceLog 实时追加）
  *   - 监听 Run 完成（更新 orchestrator 状态）
  *   - 监听 Token 用量更新
+ *   - 监听 AgentStep（ReAct 每步迭代，用于节点卡片实时渲染）
  *   - 暴露 runGraph / cancelRun 方法
  */
 export function useIceeRuntime(callbacks: {
@@ -25,6 +41,8 @@ export function useIceeRuntime(callbacks: {
   }) => void;
   onTokenUpdate: (tokens: number, costUsd: number) => void;
   onOllamaStatus?: (healthy: boolean, url: string) => void;
+  /** AgentLoop 每步迭代回调（ReAct 模式下每次 LLM 思考/工具调用/观察都会触发） */
+  onAgentStep?: (event: AgentStepEvent) => void;
 }) {
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
@@ -65,19 +83,22 @@ export function useIceeRuntime(callbacks: {
       callbacksRef.current.onTokenUpdate(payload.tokens, payload.costUsd);
     });
 
+    // 监听 AgentLoop 步骤（ReAct 模式）
+    const offAgentStep = api.onAgentStep?.((payload) => {
+      callbacksRef.current.onAgentStep?.(payload);
+    });
+
     return () => {
       offOllama();
       offStep();
       offCompleted();
       offToken();
+      offAgentStep?.();
     };
   }, [isElectron]);
 
   /**
    * 运行 Graph（优先走 Electron IPC；浏览器环境返回 null）
-   * @param graphJson      GraphDefinition JSON 字符串
-   * @param inputJson      输入数据 JSON 字符串
-   * @param attachmentsJson 附件数组 JSON 字符串（可选）
    */
   const runGraph = useCallback(
     async (

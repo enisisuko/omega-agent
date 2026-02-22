@@ -51,6 +51,49 @@ export const LLMNodeConfigSchema = z.object({
 export type LLMNodeConfig = z.infer<typeof LLMNodeConfigSchema>;
 
 /**
+ * AgentLoop 节点配置（ReAct 循环 — Cline 风格）
+ *
+ * 与固定图不同，AgentLoopConfig 让 LLM 动态决定步骤数和使用哪些工具。
+ * 每轮迭代 LLM 输出：思考(Thought) + 行动(Action) = 工具调用 或 最终答案
+ */
+export const AgentLoopConfigSchema = z.object({
+  /** 系统提示词（角色 + 能力 + 规则 + 工具说明，跟随语言设置） */
+  systemPrompt: z.string(),
+  /** 工具是否可用（由主进程在运行时填充） */
+  availableTools: z.array(z.string()).default([]),
+  /** 最大迭代轮次（防止无限循环，默认 12） */
+  maxIterations: z.number().int().positive().default(12),
+  /** 每次 LLM 请求的最大 token 数 */
+  maxTokens: z.number().int().positive().default(4096),
+  /** LLM 温度 */
+  temperature: z.number().min(0).max(2).default(0.6),
+});
+export type AgentLoopConfig = z.infer<typeof AgentLoopConfigSchema>;
+
+/**
+ * 单次 ReAct 迭代步骤（用于 UI 可视化追踪）
+ */
+export const AgentStepSchema = z.object({
+  /** 步骤序号（1 开始） */
+  index: z.number().int().positive(),
+  /** 思考内容（Thought） */
+  thought: z.string().optional(),
+  /** 工具调用名称（如果本轮调用了工具） */
+  toolName: z.string().optional(),
+  /** 工具调用参数 */
+  toolInput: z.unknown().optional(),
+  /** 工具执行结果（Observation） */
+  observation: z.string().optional(),
+  /** 最终答案（最后一轮，调用 attempt_completion 时填充） */
+  finalAnswer: z.string().optional(),
+  /** 步骤状态 */
+  status: z.enum(["thinking", "acting", "observing", "done", "error"]).default("thinking"),
+  /** token 消耗 */
+  tokens: z.number().int().default(0),
+});
+export type AgentStep = z.infer<typeof AgentStepSchema>;
+
+/**
  * Tool 节点配置
  */
 export const ToolNodeConfigSchema = z.object({
