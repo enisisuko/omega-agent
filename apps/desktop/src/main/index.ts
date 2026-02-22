@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, ipcMain, shell, dialog } from "Electron";
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
@@ -434,6 +434,68 @@ function registerProviderHandlers() {
     }
   });
 
+  // ── IPC: detect-local-ai（并行探测本地 Ollama / LM Studio）───────────
+  ipcMain.handle("omega:detect-local-ai", async () => {
+    const OLLAMA_URL = "http://localhost:11434";
+    const LMSTUDIO_URL = "http://localhost:1234/v1";
+
+    const detectOllama = async () => {
+      try {
+        const provider = new OllamaProvider({ baseUrl: OLLAMA_URL });
+        const healthy = await provider.healthCheck();
+        if (!healthy) return { healthy: false, models: [] as string[], url: OLLAMA_URL };
+        const models = await provider.listModels();
+        console.log(`[OMEGA DetectAI] Ollama healthy, models: ${models.length}`);
+        return { healthy: true, models, url: OLLAMA_URL };
+      } catch {
+        return { healthy: false, models: [] as string[], url: OLLAMA_URL };
+      }
+    };
+
+    const detectLMStudio = async () => {
+      try {
+        const provider = new OpenAICompatibleProvider({
+          id: "lmstudio-detect",
+          name: "LM Studio",
+          baseUrl: LMSTUDIO_URL,
+        });
+        const healthy = await provider.healthCheck();
+        if (!healthy) return { healthy: false, models: [] as string[], url: LMSTUDIO_URL };
+        const models = await provider.listModels();
+        console.log(`[OMEGA DetectAI] LM Studio healthy, models: ${models.length}`);
+        return { healthy: true, models, url: LMSTUDIO_URL };
+      } catch {
+        return { healthy: false, models: [] as string[], url: LMSTUDIO_URL };
+      }
+    };
+
+    const [ollama, lmstudio] = await Promise.all([detectOllama(), detectLMStudio()]);
+    return { ollama, lmstudio };
+  });
+
+  // ── IPC: list-models（按 type/baseUrl 获取模型列表）────────────────────
+  ipcMain.handle("omega:list-models", async (_e, { type, baseUrl }: { type: string; baseUrl: string }) => {
+    try {
+      let models: string[] = [];
+      if (type === "ollama") {
+        const provider = new OllamaProvider({ baseUrl });
+        models = await provider.listModels();
+      } else {
+        const provider = new OpenAICompatibleProvider({
+          id: "list-models-tmp",
+          name: "tmp",
+          baseUrl,
+        });
+        models = await provider.listModels();
+      }
+      console.log(`[OMEGA ListModels] ${type} @ ${baseUrl}: ${models.length} models`);
+      return { models };
+    } catch (e) {
+      console.warn(`[OMEGA ListModels] Failed for ${type} @ ${baseUrl}:`, e);
+      return { models: [], error: (e as Error).message };
+    }
+  });
+
   // ── IPC: list-mcp-tools（早期注册版本，runtime 未就绪时返回空列表）──
   // renderer 在 Settings 页面挂载时就调用，必须提前注册；
   // initRuntime 就绪后通过 removeHandler + re-register 覆盖为真实数据版本
@@ -555,6 +617,23 @@ function registerProviderHandlers() {
     }
   });
 
+  // ── IPC: clear-working-dir（退出当前工作目录，回到欢迎页）─────────────
+  ipcMain.handle("omega:clear-working-dir", async () => {
+    try {
+      const db = await ensureEarlyDb();
+      db.instance.prepare(
+        "DELETE FROM user_settings WHERE key='workingDir'"
+      ).run();
+      console.log("[OMEGA WorkDir] Working dir cleared");
+      // 通知 renderer 回到欢迎/选目录页
+      const allWins = BrowserWindow.getAllWindows();
+      if (allWins[0]) allWins[0].webContents.send("omega:need-workdir");
+      return { ok: true };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  });
+
   // ── IPC: cancel-run（早期占位，runtime 未就绪时忽略）────────────────
   ipcMain.handle("omega:cancel-run", async () => {
     return { ok: false, error: "Runtime not ready" };
@@ -580,6 +659,27 @@ interface AttachmentItem {
 // ── AgentLoop 取消映射（runId → AbortController）──────────────────────────
 // 用于支持用户点击 Stop 后真正终止 LLM 循环
 const agentCancelMap = new Map<string, AbortController>();
+
+// ── 会话对话历史 Map（sessionId → ChatMessage[]）──────────────────────────
+// Cline 风格的跨轮次上下文记忆：每个 session 维护完整的 messages 数组。
+// 用户在同一 session 内发送多条消息时，历史消息会被追加到数组末尾，
+// 让 LLM 能"记住"之前说过的话，实现真正的多轮对话记忆。
+//
+// 结构：
+//   sessionId → ChatMessage[]
+//     ChatMessage = { role: "user"|"assistant"|"system", content: string }
+//
+// 生命周期：
+//   - 创建：用户在某 session 首次发送消息时（session 不存在于 Map 里）
+//   - 追加：每次 run-agent-loop 完成后，将本轮的 finalMessages 存回 Map
+//   - 清除：用户点击 "New Chat" 时（前端发送 omega:clear-session-history IPC）
+//   - 上限：每个 session 最多保留 200 条消息（超出时移除最旧的一对 user+assistant）
+//
+// 注意：这仅在内存中，应用重启后历史消失（与 Cline 设计一致，每次启动是全新会话）。
+const sessionMessagesMap = new Map<string, Array<{ role: "user" | "assistant" | "system"; content: string }>>();
+
+/** 会话消息上限（超出时修剪，保留最新的）*/
+const SESSION_MESSAGES_LIMIT = 200;
 
 async function initRuntime(win: BrowserWindow) {
   if (runtimeReady) return;
@@ -908,6 +1008,9 @@ async function initRuntime(win: BrowserWindow) {
 
       console.log(`[OMEGA AgentLoop] LLM call (streaming): runId=${runId} model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.5}`);
 
+      // 每次新 LLM 调用前，通知 renderer 清空 streaming buffer，确保每轮独立显示
+      win.webContents.send("omega:stream-clear", { runId });
+
       // ── 流式调用：使用 generate() AsyncIterable，实时推送 token 到 UI ──
       // 每个 token 通过 omega:token-stream IPC 发送给 renderer（打字机效果）
       // runId 透传，renderer 用于过滤只接受当前活跃 run 的 token
@@ -1025,6 +1128,17 @@ async function initRuntime(win: BrowserWindow) {
       }
     };
 
+    // ── IPC: clear-session-history（清除指定 session 的对话历史）──────────
+    // 用户点击 New Chat 时由 renderer 调用，避免 session 历史无限累积
+    ipcMain.handle("omega:clear-session-history", async (_event, sessionId: string) => {
+      if (sessionId && sessionMessagesMap.has(sessionId)) {
+        sessionMessagesMap.delete(sessionId);
+        console.log(`[OMEGA Memory] Session history cleared: ${sessionId}`);
+        return { ok: true };
+      }
+      return { ok: false, reason: "session not found" };
+    });
+
     // ── IPC: run-agent-loop ─────────────────────────────────────────
     // 新的 ReAct 动态循环 IPC handler（替代固定图 run-graph）
     // 接受任务描述字符串，由 AgentLoopExecutor 动态决定执行步骤
@@ -1033,13 +1147,14 @@ async function initRuntime(win: BrowserWindow) {
       "omega:run-agent-loop",
       async (
         _event,
-        taskJson: string,        // { task: string, lang?: "zh"|"en", attachmentsJson?: string }
+        taskJson: string,        // { task: string, lang?: "zh"|"en", attachmentsJson?: string, sessionId?: string }
       ) => {
         let taskOpts: {
           task: string;
           lang?: "zh" | "en";
           availableTools?: string[];
           attachmentsJson?: string;
+          sessionId?: string;   // ← 新增：会话 ID，用于跨轮次记忆
         };
         try {
           taskOpts = JSON.parse(taskJson);
@@ -1051,6 +1166,19 @@ async function initRuntime(win: BrowserWindow) {
 
         const runId = nanoid();
         const lang = taskOpts.lang ?? "zh";
+        const sessionId = taskOpts.sessionId; // 可能为 undefined（旧版 renderer 兼容）
+
+        // ── 跨轮次记忆：读取该 session 的历史消息 ─────────────────────────
+        // 若有 sessionId 则从 Map 取历史；没有 sessionId 则每次都是全新对话（向后兼容）
+        const historyMessages = sessionId
+          ? (sessionMessagesMap.get(sessionId) ?? [])
+          : [];
+
+        if (historyMessages.length > 0) {
+          console.log(`[OMEGA Memory] Session ${sessionId}: loading ${historyMessages.length} history messages`);
+        } else {
+          console.log(`[OMEGA Memory] Session ${sessionId ?? "no-session"}: starting fresh (no history)`);
+        }
 
         // 获取工具列表：内置工具（始终可用）+ MCP filesystem 工具（连接时可用）
         const builtinToolNames = Array.from(BUILTIN_TOOLS.keys()); // 内置工具始终可用
@@ -1064,7 +1192,7 @@ async function initRuntime(win: BrowserWindow) {
         console.log(`[OMEGA AgentLoop] Builtin tools: [${builtinToolNames.join(",")}]`);
         console.log(`[OMEGA AgentLoop] MCP tools: [${mcpTools.join(",")}]`);
 
-        console.log(`[OMEGA AgentLoop] Starting run ${runId}, lang=${lang}, tools=[${availableTools.join(",")}]`);
+        console.log(`[OMEGA AgentLoop] Starting run ${runId}, lang=${lang}, tools=[${availableTools.join(",")}], sessionId=${sessionId ?? "none"}`);
         const runStartedAt = new Date().toISOString();
 
         // ── 写入 DB：Run 开始记录 ─────────────────────────────────────────
@@ -1085,7 +1213,8 @@ async function initRuntime(win: BrowserWindow) {
           console.warn(`[OMEGA AgentLoop DB] Failed to create run record:`, dbErr);
         }
 
-        // 通知 UI：Run 开始
+        // 通知 UI：Run 开始（携带真实 runId，renderer 用于 token 过滤同步）
+        win.webContents.send("omega:run-started", { runId });
         win.webContents.send("omega:step-event", {
           type: "SYSTEM",
           message: `Run started: ${runId}`,
@@ -1093,24 +1222,32 @@ async function initRuntime(win: BrowserWindow) {
 
         // 处理附件
         let task = taskOpts.task;
+        let taskImageUrls: string[] | undefined;
         if (taskOpts.attachmentsJson) {
           try {
             const attachments: AttachmentItem[] = JSON.parse(taskOpts.attachmentsJson);
             if (attachments.length > 0) {
               const fileCtxParts: string[] = [];
+              const imageDataUrls: string[] = [];
               for (const att of attachments) {
                 if (att.type === "file") {
                   const base64 = att.dataUrl.split(",")[1] ?? "";
                   const text = Buffer.from(base64, "base64").toString("utf-8");
                   fileCtxParts.push(`[附件文件: ${att.name}]\n${text.slice(0, 8000)}`);
+                } else if (att.type === "image") {
+                  // 图片：收集 dataUrl，以多模态消息格式传给 LLM
+                  imageDataUrls.push(att.dataUrl);
                 }
               }
               if (fileCtxParts.length > 0) {
                 task += `\n\n---\n## 附件内容\n${fileCtxParts.join("\n\n")}`;
               }
+              if (imageDataUrls.length > 0) {
+                taskImageUrls = imageDataUrls;
+              }
               win.webContents.send("omega:step-event", {
                 type: "SYSTEM",
-                message: `📎 Attachments: ${attachments.length} file(s)`,
+                message: `📎 Attachments: ${attachments.length} file(s) (${imageDataUrls.length} images)`,
               });
             }
           } catch { /* ignore */ }
@@ -1165,7 +1302,7 @@ async function initRuntime(win: BrowserWindow) {
             : "You are Omega, an experienced AI software engineer and general-purpose assistant.\nYou excel at writing code, analyzing data, searching for information, creating content, and solving complex problems.\nYou complete tasks step-by-step using tools, making decisions based on actual tool execution results.",
           availableTools,
           maxIterations: 20,
-          maxTokens: 131072,  // 128K 上下文窗口
+          maxTokens: 12288,   // 12K token 上限（输入+输出）
           temperature: 0.5,
         };
 
@@ -1232,12 +1369,41 @@ async function initRuntime(win: BrowserWindow) {
         agentCancelMap.set(runId, controller);
         const agentLLMInvoker = makeAgentLLMInvoker(runId, controller.signal);
 
+        // ── ask_followup_question 回调：AI 提问用户（Human-in-the-loop）──
+        // 当 AI 调用 ask_followup_question 时：
+        // 1. 通过 IPC 推送问题到 UI（UI 显示提问气泡 + 回复输入框）
+        // 2. 等待 UI 通过 omega:answer-followup 发回用户的回答
+        // 3. resolve Promise，agent loop 继续携带用户回答
+        const onAskFollowup = (rId: string, question: string, options?: string[]): Promise<string> => {
+          return new Promise((resolve) => {
+            // 推送提问事件到 UI
+            win.webContents.send("omega:ask-followup", { runId: rId, question, options });
+
+            // 注册一次性监听器，等待用户回答
+            const answerChannel = "omega:answer-followup";
+            const handler = (_evt: Electron.IpcMainEvent, payload: { runId: string; answer: string }) => {
+              if (payload.runId === rId) {
+                ipcMain.removeListener(answerChannel, handler);
+                resolve(payload.answer ?? "");
+              }
+            };
+            ipcMain.on(answerChannel, handler);
+
+            // 如果 AgentLoop 被 abort，自动取消等待
+            controller.signal.addEventListener("abort", () => {
+              ipcMain.removeListener(answerChannel, handler);
+              resolve("（任务已取消）");
+            }, { once: true });
+          });
+        };
+
         const executor = new AgentLoopExecutor({
           runId,
           config: loopConfig,
           invokeLLM: agentLLMInvoker,
           invokeTool: agentToolInvoker,
           onStep,
+          onAskFollowup,  // 注入用户提问回调
           lang,
           toolSchemas: allToolSchemas,
           userRules,
@@ -1246,7 +1412,29 @@ async function initRuntime(win: BrowserWindow) {
         });
 
         try {
-          const result = await executor.execute(task);
+          // 传入历史消息（实现跨轮次记忆，Cline 风格）
+          const result = await executor.execute(task, taskImageUrls, historyMessages);
+
+          // ── 跨轮次记忆：把本轮完整 messages 存回 sessionMessagesMap ──────
+          // finalMessages 包含了 initialMessages + 本轮新增的 user/assistant/tool 消息
+          // 下次用户在同一 session 发消息时，这些历史会被重新注入
+          if (sessionId && result.finalMessages) {
+            let updatedHistory = result.finalMessages;
+
+            // 超出上限时修剪：永远保留第一条（原始任务），然后删除最旧的一对消息
+            if (updatedHistory.length > SESSION_MESSAGES_LIMIT) {
+              const excess = updatedHistory.length - SESSION_MESSAGES_LIMIT;
+              // 从 index 1 开始删（保留 index 0 的原始任务消息）
+              updatedHistory = [
+                updatedHistory[0]!,
+                ...updatedHistory.slice(1 + excess),
+              ];
+              console.log(`[OMEGA Memory] Session ${sessionId}: trimmed ${excess} old messages (limit=${SESSION_MESSAGES_LIMIT})`);
+            }
+
+            sessionMessagesMap.set(sessionId, updatedHistory);
+            console.log(`[OMEGA Memory] Session ${sessionId}: saved ${updatedHistory.length} messages for next turn`);
+          }
 
           // 清理 cancelMap
           agentCancelMap.delete(runId);
@@ -1538,6 +1726,20 @@ async function initRuntime(win: BrowserWindow) {
   }
 }
 
+// ── 注册窗口控制 IPC（标题栏最小化/最大化/关闭） ───────────────
+function registerTitleBarHandlers(win: BrowserWindow) {
+  ipcMain.handle("omega:win-minimize", () => { win.minimize(); });
+  ipcMain.handle("omega:win-maximize", () => {
+    win.isMaximized() ? win.unmaximize() : win.maximize();
+    return win.isMaximized();
+  });
+  ipcMain.handle("omega:win-close", () => { win.close(); });
+  ipcMain.handle("omega:win-is-maximized", () => win.isMaximized());
+  // 最大化/还原时通知 renderer 更新按钮状态
+  win.on("maximize", () => win.webContents.send("omega:win-maximized", true));
+  win.on("unmaximize", () => win.webContents.send("omega:win-maximized", false));
+}
+
 // ── 创建主窗口 ──────────────────────────────────
 function createWindow() {
   const win = new BrowserWindow({
@@ -1545,9 +1747,10 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    // 无标题栏（匹配 Quiet Intelligence 风格）
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    backgroundColor: "#08090c",
+    // 完全自定义标题栏（类 Cursor 风格：去掉原生菜单栏和标题栏）
+    frame: false,
+    titleBarStyle: "hidden",
+    backgroundColor: "#0d0e11",
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -1557,15 +1760,18 @@ function createWindow() {
     show: false, // 等内容加载完再显示，避免白屏闪烁
   });
 
+  // 注册窗口控制 IPC
+  registerTitleBarHandlers(win);
+
   // 内容加载完后显示窗口
   win.once("ready-to-show", () => {
     win.show();
     // 窗口显示后初始化运行时 + 工作目录选择（异步，不阻塞窗口启动）
     void (async () => {
-      // ── 工作目录选择逻辑 ─────────────────────────────────────────
+      // ── 工作目录初始化逻辑 ─────────────────────────────────────────
       // 1. 读取 DB 中保存的 workingDir
-      // 2. 如果没有则弹出选择对话框（类似 Cursor 打开文件夹）
-      // 3. 扫描项目上下文并通过 IPC 推送给 renderer
+      // 2. 如果有且有效 → 推送 project-context 给 renderer（进入主界面）
+      // 3. 如果没有或已失效 → 推送 omega:need-workdir（renderer 显示欢迎/选目录页）
       try {
         const db = await ensureEarlyDb();
         const savedDirRow = db.instance.prepare(
@@ -1574,37 +1780,26 @@ function createWindow() {
 
         let workDir: string | undefined = savedDirRow?.value;
 
-        if (!workDir) {
-          // 首次启动：弹出"选择工作目录"对话框
-          const result = await dialog.showOpenDialog(win, {
-            properties: ["openDirectory"],
-            title: "选择工作目录 — Select Working Directory",
-            defaultPath: app.getPath("documents"),
-            buttonLabel: "设为工作目录 / Set as Working Directory",
-          });
-          if (!result.canceled && result.filePaths[0]) {
-            workDir = result.filePaths[0];
-            // 保存到 SQLite
-            db.instance.prepare(
-              "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES ('workingDir', ?, CURRENT_TIMESTAMP)"
-            ).run(workDir);
-            console.log(`[OMEGA WorkDir] New working dir saved: ${workDir}`);
-          }
-        } else {
-          // 验证保存的目录是否仍然存在
-          if (!fs.existsSync(workDir)) {
-            console.warn(`[OMEGA WorkDir] Saved working dir no longer exists: ${workDir}`);
-            workDir = undefined;
-          }
+        // 验证保存的目录是否仍然存在
+        if (workDir && !fs.existsSync(workDir)) {
+          console.warn(`[OMEGA WorkDir] Saved working dir no longer exists: ${workDir}`);
+          workDir = undefined;
         }
 
-        // 扫描并推送项目上下文
         if (workDir) {
+          // 已有工作目录：扫描并推送项目上下文，renderer 直接进入主界面
           const ctx = scanProjectContext(workDir);
           win.webContents.send("omega:project-context", ctx);
+          console.log(`[OMEGA WorkDir] Restored working dir: ${workDir}`);
+        } else {
+          // 无工作目录：通知 renderer 显示欢迎/选目录页
+          win.webContents.send("omega:need-workdir");
+          console.log("[OMEGA WorkDir] No working dir, notifying renderer to show picker");
         }
       } catch (e) {
         console.warn("[OMEGA WorkDir] Working dir init failed (non-fatal):", e);
+        // 出错时也让 renderer 显示选目录页
+        win.webContents.send("omega:need-workdir");
       }
 
       // 初始化运行时（不阻塞窗口启动）
@@ -1639,6 +1834,9 @@ app.setPath("userData", path.join(app.getPath("appData"), "OmegaAgent"));
 
 // ── Electron 生命周期 ──────────────────────────
 app.whenReady().then(() => {
+  // 去掉原生菜单栏（类 Cursor 风格）
+  Menu.setApplicationMenu(null);
+
   // 提前注册 Provider CRUD IPC（不依赖 runtime 就绪）
   // 必须在 createWindow() 之前调用，确保渲染进程一启动就能使用
   registerProviderHandlers();

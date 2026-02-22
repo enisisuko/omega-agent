@@ -126,6 +126,13 @@ interface OmegaApi {
   setMcpAllowedDir(dirOrDialog: string): Promise<OmegaMcpStatusResult>;
   /** 重载 Provider（保存配置后触发主进程重新健康检查并推送 ollama-status 事件） */
   reloadProvider(): Promise<{ ok?: boolean; healthy?: boolean; url?: string; error?: string; message?: string }>;
+  /** 并行探测本地 Ollama / LM Studio，返回健康状态和已安装模型列表 */
+  detectLocalAI?(): Promise<{
+    ollama: { healthy: boolean; models: string[]; url: string };
+    lmstudio: { healthy: boolean; models: string[]; url: string };
+  }>;
+  /** 按指定 type/baseUrl 获取模型列表 */
+  listModels?(type: string, baseUrl: string): Promise<{ models: string[]; error?: string }>;
 
   // ── 事件订阅 ──────────────────────────────────
 
@@ -142,6 +149,25 @@ interface OmegaApi {
 
   /** 监听 LLM 流式 token（打字机效果，每 token 一次回调） */
   onTokenStream?(callback: (payload: { token: string; runId: string }) => void): () => void;
+
+  /** 监听新 LLM 迭代开始（每次迭代 streaming 前触发，用于清空 buffer 实现逐轮显示） */
+  onStreamClear?(callback: (payload: { runId: string }) => void): () => void;
+
+  /** 监听 Run 开始事件（携带后端真实 runId，用于 token-stream 过滤 ID 对齐） */
+  onRunStarted?(callback: (payload: { runId: string }) => void): () => void;
+
+  /**
+   * 监听 AI 提问事件（ask_followup_question 工具触发）
+   * UI 收到后显示提问气泡和回复输入框
+   */
+  onAskFollowup?(callback: (payload: { runId: string; question: string; options?: string[] }) => void): () => void;
+
+  /**
+   * 提交用户对 AI 提问的回答
+   * @param runId  对应的 Run ID
+   * @param answer 用户输入的回答文字
+   */
+  submitFollowupAnswer?(runId: string, answer: string): void;
 
   // ── Rules 管理 ────────────────────────────────
 
@@ -162,6 +188,25 @@ interface OmegaApi {
   changeWorkingDir?(): Promise<{ ok?: boolean; canceled?: boolean; workingDir?: string; error?: string }>;
   /** 读取当前保存的工作目录 */
   getWorkingDir?(): Promise<{ workingDir: string | null; error?: string }>;
+  /** 清除工作目录并回到欢迎/选目录页（main 推送 omega:need-workdir） */
+  clearWorkingDir?(): Promise<{ ok?: boolean; error?: string }>;
+
+  // ── 窗口控制（自定义标题栏） ──────────────────────
+  winMinimize?(): Promise<void>;
+  winMaximize?(): Promise<boolean>;
+  winClose?(): Promise<void>;
+  winIsMaximized?(): Promise<boolean>;
+  onWinMaximized?(callback: (isMax: boolean) => void): () => void;
+
+  // ── 工作目录选择页 ────────────────────────────────
+  onNeedWorkdir?(callback: () => void): () => void;
+
+  // ── 对话历史管理（跨轮次记忆）──────────────────────
+  /**
+   * 清除指定 session 的对话历史（New Chat 时调用）
+   * @param sessionId 会话 ID
+   */
+  clearSessionHistory?(sessionId: string): Promise<{ ok: boolean; reason?: string }>;
 }
 
 declare global {

@@ -1,4 +1,4 @@
-﻿import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
 /**
  * Omega Preload — contextBridge 安全接口 (v0.3.5)
@@ -159,6 +159,21 @@ contextBridge.exposeInMainWorld("omega", {
   reloadProvider: () =>
     ipcRenderer.invoke("omega:reload-provider"),
 
+  /**
+   * 并行探测本地 Ollama 和 LM Studio，返回健康状态和已安装模型列表
+   */
+  detectLocalAI: (): Promise<{
+    ollama: { healthy: boolean; models: string[]; url: string };
+    lmstudio: { healthy: boolean; models: string[]; url: string };
+  }> =>
+    ipcRenderer.invoke("omega:detect-local-ai"),
+
+  /**
+   * 按指定 type/baseUrl 获取模型列表（用于表单中的模型下拉）
+   */
+  listModels: (type: string, baseUrl: string): Promise<{ models: string[]; error?: string }> =>
+    ipcRenderer.invoke("omega:list-models", { type, baseUrl }),
+
   // ── 事件订阅 ──────────────────────────────────
 
   /**
@@ -223,6 +238,46 @@ contextBridge.exposeInMainWorld("omega", {
     return () => ipcRenderer.off("omega:token-stream", handler);
   },
 
+  /**
+   * 监听新 LLM 调用开始（每次迭代开始时发送，用于清空 streaming buffer 实现每轮独立显示）
+   */
+  onStreamClear: (callback: (payload: { runId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { runId: string }) =>
+      callback(payload);
+    ipcRenderer.on("omega:stream-clear", handler);
+    return () => ipcRenderer.off("omega:stream-clear", handler);
+  },
+
+  /**
+   * 监听 Run 开始事件（携带后端真实 runId，用于 token 过滤 ID 同步）
+   */
+  onRunStarted: (callback: (payload: { runId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { runId: string }) =>
+      callback(payload);
+    ipcRenderer.on("omega:run-started", handler);
+    return () => ipcRenderer.off("omega:run-started", handler);
+  },
+
+  /**
+   * 监听 AI 提问事件（ask_followup_question 工具触发）
+   * UI 收到后显示提问气泡和回复输入框
+   */
+  onAskFollowup: (callback: (payload: { runId: string; question: string; options?: string[] }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { runId: string; question: string; options?: string[] }) =>
+      callback(payload);
+    ipcRenderer.on("omega:ask-followup", handler);
+    return () => ipcRenderer.off("omega:ask-followup", handler);
+  },
+
+  /**
+   * 提交用户对 AI 提问的回答（由 UI 回复输入框触发）
+   * @param runId  对应的 Run ID
+   * @param answer 用户的回答文字
+   */
+  submitFollowupAnswer: (runId: string, answer: string): void => {
+    ipcRenderer.send("omega:answer-followup", { runId, answer });
+  },
+
   // ── Rules 管理 ────────────────────────────────
 
   /**
@@ -281,6 +336,50 @@ contextBridge.exposeInMainWorld("omega", {
    */
   getWorkingDir: (): Promise<{ workingDir: string | null; error?: string }> =>
     ipcRenderer.invoke("omega:get-working-dir"),
+
+  /**
+   * 清除当前工作目录并让 main 推送 omega:need-workdir，
+   * 使 renderer 回到欢迎/选目录页
+   */
+  clearWorkingDir: (): Promise<{ ok?: boolean; error?: string }> =>
+    ipcRenderer.invoke("omega:clear-working-dir"),
+
+  // ── 窗口控制（自定义标题栏） ──────────────────────
+  /** 最小化窗口 */
+  winMinimize: (): Promise<void> =>
+    ipcRenderer.invoke("omega:win-minimize"),
+  /** 最大化 / 还原窗口，返回最大化后的状态 */
+  winMaximize: (): Promise<boolean> =>
+    ipcRenderer.invoke("omega:win-maximize"),
+  /** 关闭窗口 */
+  winClose: (): Promise<void> =>
+    ipcRenderer.invoke("omega:win-close"),
+  /** 查询当前是否最大化 */
+  winIsMaximized: (): Promise<boolean> =>
+    ipcRenderer.invoke("omega:win-is-maximized"),
+  /** 监听最大化/还原事件（返回取消函数） */
+  onWinMaximized: (callback: (isMax: boolean) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, isMax: boolean) => callback(isMax);
+    ipcRenderer.on("omega:win-maximized", handler);
+    return () => ipcRenderer.off("omega:win-maximized", handler);
+  },
+
+  // ── 工作目录选择页控制 ────────────────────────────
+  /** 监听"需要选择工作目录"事件（未保存目录时 main 推送，renderer 显示欢迎页） */
+  onNeedWorkdir: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("omega:need-workdir", handler);
+    return () => ipcRenderer.off("omega:need-workdir", handler);
+  },
+
+  // ── 对话历史管理（跨轮次记忆）──────────────────────
+  /**
+   * 清除指定 session 的对话历史（用户点击 New Chat 时调用）
+   * 避免旧会话记忆带入新会话
+   * @param sessionId 会话 ID（对应 App.tsx 中的 session.id）
+   */
+  clearSessionHistory: (sessionId: string): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke("omega:clear-session-history", sessionId),
 });
 
 // ── 向 renderer 暴露的 window.omega 类型声明 ────

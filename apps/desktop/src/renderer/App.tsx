@@ -1,10 +1,12 @@
-﻿import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sidebar } from "./components/layout/Sidebar.js";
 import { NerveCenter } from "./components/nerve-center/NerveCenter.js";
 import { TraceLogDrawer } from "./components/nerve-center/TraceLogDrawer.js";
 import { ArtifactsPage } from "./components/pages/ArtifactsPage.js";
 import { SettingsPage } from "./components/pages/SettingsPage.js";
+import { WorkdirPickerPage } from "./components/pages/WorkdirPickerPage.js";
+import { CustomTitleBar } from "./components/layout/CustomTitleBar.js";
 import { useOmegaRuntime } from "./hooks/useOmegaRuntime.js";
 import { useLanguage } from "./i18n/LanguageContext.js";
 import {
@@ -168,6 +170,13 @@ export function App() {
   // 当前活跃的 runId（用于过滤 token-stream，防止多 run 混流）
   const activeRunIdRef = useRef<string | null>(null);
 
+  // ── ask_followup_question 状态（AI 向用户提问）────────────────
+  const [pendingFollowup, setPendingFollowup] = useState<{
+    runId: string;
+    question: string;
+    options?: string[];
+  } | null>(null);
+
   // ── 真实 MCP 工具数据（Electron 下从主进程拉取；浏览器 dev fallback mockMcpTools）─────
   const [mcpToolsData, setMcpToolsData] = useState<McpToolData[]>([]);
 
@@ -184,14 +193,26 @@ export function App() {
 
   // ── 项目上下文（工作目录扫描结果，由主进程推送）────────────────────
   const [projectContext, setProjectContext] = useState<OmegaProjectContext | null>(null);
+  // needWorkdir: true = 显示欢迎/选目录页；false/null = 主界面
+  // null 表示"还没收到主进程的消息，等待中"（避免闪屏）
+  const [needWorkdir, setNeedWorkdir] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // 监听主进程推送的项目上下文
-    const unsub = window.omega?.onProjectContext?.((ctx) => {
+    // 监听主进程推送的项目上下文（有工作目录 → 进主界面）
+    const unsubCtx = window.omega?.onProjectContext?.((ctx) => {
       console.log(`[OMEGA] Project context received: dir=${ctx.workingDir} git=${ctx.isGitRepo}`);
       setProjectContext(ctx);
+      setNeedWorkdir(false); // 有了工作目录，进主界面
     });
-    return () => { unsub?.(); };
+    // 监听主进程推送的"需要选择工作目录"（无工作目录 → 欢迎页）
+    const unsubNeed = window.omega?.onNeedWorkdir?.(() => {
+      console.log("[OMEGA] Need workdir, showing picker page");
+      setNeedWorkdir(true);
+    });
+    return () => {
+      unsubCtx?.();
+      unsubNeed?.();
+    };
   }, []);
 
   // ── IPC 桥接（Electron 环境下激活，浏览器 dev 静默跳过）────────
@@ -336,6 +357,18 @@ export function App() {
             return edge;
           });
 
+          // ── 将所有仍在 running 的 subagent 节点置为终态 ────────
+          const finalSubagents = s.subagents.map((n) =>
+            n.state.status === "running"
+              ? {
+                  ...n,
+                  state: isFailed
+                    ? { status: "error" as const, errorMsg: "Run ended" }
+                    : { status: "success" as const, output: "Completed" },
+                }
+              : n
+          );
+
           // ── 同步更新最新轮状态和 AI 回复 ──────────────────────
           const completedRounds = (s.rounds ?? []).map((r, i) => {
             if (i !== (s.rounds?.length ?? 1) - 1) return r;
@@ -344,6 +377,17 @@ export function App() {
               executionEdges: finalEdges,
               state: (isFailed ? "failed" : "completed") as "completed" | "failed",
               ...(aiText !== undefined && { aiOutput: aiText }),
+              // 同步轮内的 subagents 状态
+              subagents: (r.subagents ?? s.subagents).map((n) =>
+                n.state.status === "running"
+                  ? {
+                      ...n,
+                      state: isFailed
+                        ? { status: "error" as const, errorMsg: "Run ended" }
+                        : { status: "success" as const, output: "Completed" },
+                    }
+                  : n
+              ),
             };
           });
 
@@ -358,6 +402,8 @@ export function App() {
               totalCostUsd: payload.totalCostUsd,
               activeAgents: 0,
             },
+            // 将 running 节点置为终态
+            subagents: finalSubagents,
             // 写入 AI 回复（向下兼容）
             ...(aiText !== undefined && { aiOutput: aiText }),
             // 更新最终边状态（向下兼容）
@@ -424,71 +470,111 @@ export function App() {
      */
     onAgentStep: useCallback((event: import("./hooks/useOmegaRuntime.js").AgentStepEvent) => {
       const { step } = event;
+      // 每个 step.index 对应唯一一个节点卡片，随 thinking→acting→observing→done 流转
       const nodeId = `agent_step_${step.index}`;
 
-      // 状态映射
-      const nodeTypeMap: Record<typeof step.status, SubagentNode["type"]> = {
-        thinking:  "LLM",
-        acting:    "TOOL",
-        observing: "MEMORY",
-        done:      "REFLECTION",
-        error:     "LLM",
-      };
+      console.log(`[OMEGA AgentStep] step=${step.index} status=${step.status} tool=${step.toolName ?? "-"}`);
 
-      const nodeLabelMap: Record<typeof step.status, string> = {
-        thinking:  `${t.nerveCenter.nodeStepThinking}${step.index}`,
-        acting:    `${t.nerveCenter.nodeStepTool}${step.toolName ?? "..."}`,
-        observing: `${t.nerveCenter.nodeStepObserve}${step.index}`,
-        done:      `${t.nerveCenter.nodeStepDone}${step.index}`,
-        error:     `${t.nerveCenter.nodeStepError}${step.index}`,
-      };
-
-      const nodeState: SubagentNode["state"] =
-        step.status === "done"
-          ? { status: "success", output: step.finalAnswer ?? "Done", tokens: step.tokens }
-          : step.status === "error"
-          ? { status: "error", errorMsg: step.thought ?? "Error" }
-          : {
-              status: "running",
-              currentTask: step.status === "acting"
-                ? `${t.nerveCenter.nodeStepRunningTool}${step.toolName}`
-                : step.status === "observing"
-                ? `${t.nerveCenter.nodeStepObserveResult}${(step.observation ?? "").slice(0, 60)}`
-                : step.thought?.slice(0, 80) ?? t.nerveCenter.nodeStepThinkingIdle,
-            };
-
-      const taskPreview =
-        step.status === "thinking" ? step.thought?.slice(0, 100)
-        : step.status === "acting" ? `${t.nerveCenter.callingTool}${step.toolName}`
-        : step.status === "observing" ? t.nerveCenter.continueAnalyze
-        : step.status === "done" ? t.nerveCenter.taskCompleted
-        : undefined;
-
-      const newNode: SubagentNode = {
-        id: nodeId,
-        label: nodeLabelMap[step.status] ?? nodeId,
-        type: nodeTypeMap[step.status] ?? "LLM",
-        pipeConnected: true,
-        ...(taskPreview !== undefined && { taskPreview }),
-        state: nodeState,
-      };
-
-      console.log(`[OMEGA AgentStep] step=${step.index} status=${step.status} nodeId=${nodeId}`);
-
-      // 使用 ref 读取最新 sessionId
       const sid = activeSessionIdRef.current;
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== sid) return s;
 
-          // 更新最新轮（rounds 最后一项）的 subagents
           const rounds = s.rounds ?? [];
           if (rounds.length === 0) return s;
 
           const lastRoundIdx = rounds.length - 1;
           const lastRound = rounds[lastRoundIdx]!;
 
-          // 查找是否已存在同 nodeId 的节点（同一步骤的状态更新）
+          // 找到已有节点（同 index 的不同 status 阶段都共用同一节点）
+          const existingNode = lastRound.subagents.find(n => n.id === nodeId);
+
+          // ── 生成有意义的节点标签 ──────────────────────────────
+          // 思考节点：显示思考内容摘要（取前 50 字）
+          // 工具节点：显示工具名 + 观察结果摘要
+          // 完成节点：显示最终答案摘要
+          let nodeLabel = existingNode?.label ?? `Step ${step.index}`;
+          let nodeType: SubagentNode["type"] = existingNode?.type ?? "LLM";
+
+          if (step.status === "thinking") {
+            // 思考时：显示思考内容摘要作为标签
+            const thoughtSnip = step.thought?.replace(/\n/g, " ").trim().slice(0, 50);
+            nodeLabel = thoughtSnip ? `💭 ${thoughtSnip}` : `思考 #${step.index}`;
+            nodeType = "LLM";
+          } else if (step.status === "acting") {
+            // 工具调用时：显示工具名
+            nodeLabel = `⚙ ${step.toolName ?? "Tool"}`;
+            nodeType = "TOOL";
+          } else if (step.status === "observing") {
+            // 观察时：保留 acting 时的标签，更新类型
+            nodeLabel = existingNode?.label ?? `⚙ ${step.toolName ?? "Tool"}`;
+            nodeType = "MEMORY";
+          } else if (step.status === "done") {
+            // 完成：显示答案摘要
+            const ansSnip = step.finalAnswer?.replace(/\n/g, " ").trim().slice(0, 50);
+            nodeLabel = ansSnip ? `✓ ${ansSnip}` : `完成 #${step.index}`;
+            nodeType = "REFLECTION";
+          } else if (step.status === "error") {
+            nodeLabel = existingNode?.label ?? `错误 #${step.index}`;
+            nodeType = "LLM";
+          }
+
+          // ── 生成节点状态 ──────────────────────────────────────
+          const nodeState: SubagentNode["state"] =
+            step.status === "done"
+              ? { status: "success", output: step.finalAnswer ?? "Done", tokens: step.tokens }
+              : step.status === "error"
+              ? { status: "error", errorMsg: step.thought ?? "Error" }
+              : {
+                  status: "running",
+                  currentTask: step.status === "acting"
+                    ? `${t.nerveCenter.nodeStepRunningTool}${step.toolName}`
+                    : step.status === "observing"
+                    ? `${t.nerveCenter.nodeStepObserveResult}${(step.observation ?? "").slice(0, 60)}`
+                    : step.thought?.slice(0, 80) ?? t.nerveCenter.nodeStepThinkingIdle,
+                };
+
+          // ── taskPreview（节点副标题，只在首次出现时写入） ──────
+          let taskPreview = existingNode?.taskPreview;
+          if (!taskPreview) {
+            if (step.status === "thinking") taskPreview = step.thought?.slice(0, 120);
+            else if (step.status === "acting") taskPreview = `${t.nerveCenter.callingTool}${step.toolName}`;
+            else if (step.status === "observing") taskPreview = t.nerveCenter.continueAnalyze;
+            else if (step.status === "done") taskPreview = t.nerveCenter.taskCompleted;
+          }
+
+          // ── 累积 steps 记录（使展开功能可用）─────────────────
+          // 每个新 status 阶段都追加一条 NodeStepRecord，
+          // 这样 hasSteps=true，canExpand 就能成立
+          const prevSteps: NodeStepRecord[] = existingNode?.steps ?? [];
+          const stepRecordId = `${nodeId}_${step.status}_${Date.now()}`;
+          const newStepRecord: NodeStepRecord = {
+            id: stepRecordId,
+            index: prevSteps.length + 1,
+            status: step.status === "done" ? "success"
+              : step.status === "error" ? "error"
+              : "running",
+            startedAt: new Date().toISOString(),
+            ...(step.thought && { prompt: step.thought }),
+            ...(step.observation && { input: step.observation }),
+            ...(step.finalAnswer && { output: step.finalAnswer }),
+            ...(step.tokens && { tokens: step.tokens }),
+            ...(step.toolName && { input: `Tool: ${step.toolName}` }),
+          };
+          const updatedSteps = [...prevSteps, newStepRecord];
+
+          // ── 组装新节点 ────────────────────────────────────────
+          const newNode: SubagentNode = {
+            id: nodeId,
+            label: nodeLabel,
+            type: nodeType,
+            pipeConnected: true,
+            ...(taskPreview !== undefined && { taskPreview }),
+            steps: updatedSteps,
+            state: nodeState,
+          };
+
+          // 替换或新增节点
           const existingIdx = lastRound.subagents.findIndex(n => n.id === nodeId);
           const updatedSubagents = existingIdx >= 0
             ? lastRound.subagents.map((n, i) => i === existingIdx ? newNode : n)
@@ -523,14 +609,52 @@ export function App() {
     return unsub;
   }, [isElectron]);
 
+  // ── Run 开始时同步真实 runId（解决 token 过滤 ID 不匹配问题）──────
+  // main process 在 agent loop 开始时立即发送 omega:run-started 携带后端真实 runId
+  // 前端用这个真实 runId 替换 tempRunId，使后续的 token-stream 过滤正确匹配
+  useEffect(() => {
+    if (!isElectron || !window.omega?.onRunStarted) return;
+
+    const unsub = window.omega.onRunStarted(({ runId }) => {
+      // 将后端真实 runId 同步到 ref，确保 token 过滤不会因为 ID 不同而丢弃所有 token
+      activeRunIdRef.current = runId;
+    });
+    return unsub;
+  }, [isElectron]);
+
+  // ── 每次新迭代开始时清空 streaming buffer ──────────────────────
+  // main process 在每次 LLM 调用前发送 omega:stream-clear
+  // 确保每轮 streaming 独立显示，不累积多轮历史文本
+  useEffect(() => {
+    if (!isElectron || !window.omega?.onStreamClear) return;
+
+    const unsub = window.omega.onStreamClear(({ runId }) => {
+      // 只处理当前活跃 run 的信号（此时 activeRunIdRef 已是真实 runId）
+      if (runId && activeRunIdRef.current && runId !== activeRunIdRef.current) return;
+      setStreamingText("");   // 清空旧迭代文本，准备接收新迭代 token
+      setIsStreaming(false);  // 短暂重置，等第一个 token 到来时再置 true
+    });
+    return unsub;
+  }, [isElectron]);
+
   // Run 完成时停止 streaming 状态（onRunCompleted 已处理 aiOutput，streaming 状态重置）
   useEffect(() => {
     if (currentSession.state === "completed" || currentSession.state === "failed" || currentSession.state === "cancelled") {
       setIsStreaming(false);
       setStreamingText(""); // 清空 streaming buffer（最终内容已在 session.aiOutput）
       activeRunIdRef.current = null;
+      setPendingFollowup(null); // 清空悬挂的提问（run 结束后提问无意义）
     }
   }, [currentSession.state]);
+
+  // ── 监听 AI 提问事件（ask_followup_question）─────────────────
+  useEffect(() => {
+    if (!isElectron || !window.omega?.onAskFollowup) return;
+    const unsub = window.omega.onAskFollowup((payload) => {
+      setPendingFollowup(payload); // 显示提问气泡
+    });
+    return unsub;
+  }, [isElectron]);
 
   // 启动时通过 IPC 拉取历史 Run 记录
   useEffect(() => {
@@ -649,8 +773,27 @@ export function App() {
   /** 新建空白会话，插到列表头部并激活 */
   const handleNewChat = useCallback(() => {
     const blank = createBlankSession();
+    // 通知主进程清除当前会话的对话历史（避免旧记忆带入新会话）
+    if (isElectron && activeSessionId) {
+      window.omega?.clearSessionHistory?.(activeSessionId).catch(() => {
+        // 忽略清除失败（主进程可能尚未就绪）
+      });
+    }
     setSessions((prev) => [blank, ...prev]);
     setActiveSessionId(blank.id);
+  }, [activeSessionId]);
+
+  /** 退出当前工作目录 → 清除数据库记录 → 回到欢迎页 */
+  const handleExitWorkdir = useCallback(async () => {
+    try {
+      await window.omega?.clearWorkingDir?.();
+      // main 会推送 omega:need-workdir，useEffect 会把 needWorkdir 置 true
+      // 但 main 已经推了，以防万一本地也设一下
+      setNeedWorkdir(true);
+    } catch (e) {
+      console.error("[OMEGA] clearWorkingDir failed:", e);
+      setNeedWorkdir(true);
+    }
   }, []);
 
   /** 点击历史会话切换 */
@@ -687,6 +830,8 @@ export function App() {
       const newRound: ExecutionRound = {
         roundIndex: 0,
         task,
+        // 保存附件供 UserBubble 显示（图片/文件）
+        ...(attachments.length > 0 && { attachments }),
         submittedAt: new Date().toISOString(),
         executionEdges: initialEdges,
         subagents: [],
@@ -734,6 +879,9 @@ export function App() {
         const taskJson = JSON.stringify({
           task,
           lang,
+          // 关键：传入 sessionId，让主进程能跨轮次保存和加载对话历史（Cline 风格记忆）
+          // sid 是当前激活会话的 ID，同一会话内多次发消息都使用同一个 sid
+          sessionId: sid,
           ...(attachmentsJson && { attachmentsJson }),
           // 注入项目上下文（工作目录信息、框架、rules 等），供 Agent 系统提示使用
           ...(projectContext && { projectContext }),
@@ -1205,11 +1353,39 @@ export function App() {
     );
   }, [activeSessionId, isElectron, cancelRun, currentSession.orchestrator.runId]);
 
+  // ── 等待主进程消息（避免初始闪屏）────────────────────────────────────
+  if (needWorkdir === null) {
+    return (
+      <div className="flex flex-col h-screen w-screen bg-[#0d0e11]">
+        <CustomTitleBar />
+        <div className="flex-1" />
+      </div>
+    );
+  }
+
+  // ── 欢迎页（未选工作目录）────────────────────────────────────────────
+  if (needWorkdir === true) {
+    return (
+      <div className="flex flex-col h-screen w-screen bg-[#0d0e11]">
+        <CustomTitleBar />
+        <WorkdirPickerPage
+          onSelected={() => setNeedWorkdir(false)}
+        />
+      </div>
+    );
+  }
+
+  // ── 主界面 ───────────────────────────────────────────────────────────
   return (
     <div
-      className="flex h-screen w-screen overflow-hidden"
-      style={{ background: "#08090c" }}
+      className="flex flex-col h-screen w-screen overflow-hidden"
+      style={{ background: "#0d0e11" }}
     >
+      {/* 自定义标题栏（类 Cursor 风格） */}
+      <CustomTitleBar />
+
+      {/* 主体：侧边栏 + 内容区 */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
       {/* 左侧侧边栏（含会话历史 + Ollama 状态） */}
       <Sidebar
         activeRoute={activeRoute}
@@ -1219,6 +1395,7 @@ export function App() {
         onSelectSession={handleSelectSession}
         onNewChat={handleNewChat}
         ollamaConnected={ollamaConnected}
+        onExitWorkdir={handleExitWorkdir}
       />
 
       {/* 主内容区（路由切换） */}
@@ -1233,15 +1410,15 @@ export function App() {
             transition={{ duration: 0.15, ease: "easeOut" }}
           >
             {activeRoute === "dashboard" && (
-              <AnimatePresence mode="wait">
-                {/* key 绑定 sessionId，切换 session 时触发淡入淡出 */}
+              <AnimatePresence>
+                {/* key 绑定 sessionId，切换 session 时触发淡入淡出（sync 模式避免全黑空档） */}
                 <motion.div
                   key={activeSessionId}
                   className="absolute inset-0"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.12 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <NerveCenter
                     orchestrator={orchestrator}
@@ -1263,6 +1440,12 @@ export function App() {
                     providers={providers}
                     selectedModel={selectedModel}
                     onModelChange={setSelectedModel}
+                    pendingFollowup={pendingFollowup}
+                    onSubmitFollowup={(answer) => {
+                      if (!pendingFollowup) return;
+                      window.omega?.submitFollowupAnswer?.(pendingFollowup.runId, answer);
+                      setPendingFollowup(null); // 清除提问状态
+                    }}
                   />
                 </motion.div>
               </AnimatePresence>
@@ -1307,6 +1490,7 @@ export function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      </div> {/* flex flex-1 min-h-0 wrapper */}
     </div>
   );
 }
