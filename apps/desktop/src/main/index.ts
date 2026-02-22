@@ -425,6 +425,10 @@ interface AttachmentItem {
   sizeBytes: number;
 }
 
+// ── AgentLoop 取消映射（runId → AbortController）──────────────────────────
+// 用于支持用户点击 Stop 后真正终止 LLM 循环
+const agentCancelMap = new Map<string, AbortController>();
+
 async function initRuntime(win: BrowserWindow) {
   if (runtimeReady) return;
   runtimeReady = true;
@@ -717,13 +721,17 @@ async function initRuntime(win: BrowserWindow) {
       }
     );
 
-    // ── AgentLoop LLM invoker（供 AgentLoopExecutor 使用，多轮对话风格）──
+    // ── AgentLoop LLM invoker 工厂（绑定 runId + signal，供 AgentLoopExecutor 使用）──
     // 与 sharedInvokeProvider 不同：接受完整的 ChatMessage[] 数组，支持 ReAct 上下文
-    const agentLLMInvoker = async (
+    // runId 透传到 icee:token-stream，renderer 过滤时使用；signal 用于中断流式调用
+    const makeAgentLLMInvoker = (runId: string, signal: AbortSignal) => async (
       systemPrompt: string,
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
       opts?: { temperature?: number; maxTokens?: number }
     ): Promise<{ text: string; tokens: number; costUsd: number }> => {
+      // 在每次 LLM 调用前检查取消状态
+      if (signal.aborted) throw new Error("Run cancelled");
+
       // 实时从 DB 获取最新 provider（与 sharedInvokeProvider 逻辑相同）
       let liveProvider = globalProviderRef.instance;
       let liveModel = globalProviderRef.model;
@@ -746,10 +754,11 @@ async function initRuntime(win: BrowserWindow) {
 
       if (!liveProvider) throw new Error("No LLM provider available");
 
-      console.log(`[ICEE AgentLoop] LLM call (streaming): model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.5}`);
+      console.log(`[ICEE AgentLoop] LLM call (streaming): runId=${runId} model=${liveModel} msgs=${messages.length} temp=${opts?.temperature ?? 0.5}`);
 
       // ── 流式调用：使用 generate() AsyncIterable，实时推送 token 到 UI ──
       // 每个 token 通过 icee:token-stream IPC 发送给 renderer（打字机效果）
+      // runId 透传，renderer 用于过滤只接受当前活跃 run 的 token
       let fullText = "";
       let totalTokens = 0;
 
@@ -765,13 +774,18 @@ async function initRuntime(win: BrowserWindow) {
         });
 
         for await (const event of stream) {
+          // 流式过程中实时检查取消信号
+          if (signal.aborted) {
+            console.log(`[ICEE AgentLoop] Stream aborted for runId=${runId}`);
+            break;
+          }
           if (!event.done) {
             // 每个 token 片段
             fullText += event.token;
-            // 推送每个 token 到 renderer（流式打字机）
+            // 推送每个 token 到 renderer（流式打字机），携带真实 runId
             win.webContents.send("icee:token-stream", {
               token: event.token,
-              runId: "current",
+              runId,
             });
           } else {
             // 最后一个事件（done=true），包含完整的 usage
@@ -780,6 +794,8 @@ async function initRuntime(win: BrowserWindow) {
           }
         }
       } catch (streamErr) {
+        // 取消引起的中断不视为错误
+        if (signal.aborted) throw new Error("Run cancelled");
         // 流式失败时 fallback 到 generateComplete（保持向后兼容）
         console.warn("[ICEE AgentLoop] Streaming failed, falling back to generateComplete:", streamErr);
         const fallbackResult = await liveProvider.generateComplete({
@@ -897,6 +913,25 @@ async function initRuntime(win: BrowserWindow) {
         console.log(`[ICEE AgentLoop] MCP tools: [${mcpTools.join(",")}]`);
 
         console.log(`[ICEE AgentLoop] Starting run ${runId}, lang=${lang}, tools=[${availableTools.join(",")}]`);
+        const runStartedAt = new Date().toISOString();
+
+        // ── 写入 DB：Run 开始记录 ─────────────────────────────────────────
+        try {
+          runRepo.create({
+            runId,
+            graphId: "agent-loop",          // AgentLoop 特殊 graphId 标识
+            graphVersion: "1",
+            state: "running",
+            totalTokens: 0,
+            totalCostUsd: 0,
+            input: { task: taskOpts.task.slice(0, 500) }, // 存储任务摘要
+            startedAt: runStartedAt,
+            createdAt: runStartedAt,
+          });
+          console.log(`[ICEE AgentLoop DB] Run created: ${runId}`);
+        } catch (dbErr) {
+          console.warn(`[ICEE AgentLoop DB] Failed to create run record:`, dbErr);
+        }
 
         // 通知 UI：Run 开始
         win.webContents.send("icee:step-event", {
@@ -982,7 +1017,7 @@ async function initRuntime(win: BrowserWindow) {
           temperature: 0.5,
         };
 
-        // 每次迭代步骤回调 → 转换为 step-event 推送到 UI
+        // 每次迭代步骤回调 → 转换为 step-event 推送到 UI，同时写入 DB
         const onStep = (rId: string, step: import("@icee/shared").AgentStep) => {
           const nodeId = `agent_step_${step.index}`;
 
@@ -1015,7 +1050,35 @@ async function initRuntime(win: BrowserWindow) {
 
           // 同时把步骤详情通过 icee:agent-step 推送（UI 用于节点卡片渲染）
           win.webContents.send("icee:agent-step", { runId: rId, step });
+
+          // ── 写入 DB：Step 记录（仅 done 状态写一次，避免重复写）────────
+          if (step.status === "done" || step.status === "error") {
+            const now = new Date().toISOString();
+            try {
+              stepRepo.create({
+                stepId: `${rId}_step_${step.index}`,
+                runId: rId,
+                nodeId,
+                nodeType: step.toolName ? "tool" : "llm",
+                nodeLabel: step.toolName ?? `Step ${step.index}`,
+                state: step.status === "error" ? "failed" : "completed",
+                inherited: false,
+                retryCount: 0,
+                startedAt: now,
+                completedAt: now,
+                sequence: step.index,
+              });
+            } catch (dbErr) {
+              // DB 写入失败不影响主流程
+              console.warn(`[ICEE AgentLoop DB] Failed to create step record:`, dbErr);
+            }
+          }
         };
+
+        // ── 创建 AbortController，注册到 cancelMap ────────────────────
+        const controller = new AbortController();
+        agentCancelMap.set(runId, controller);
+        const agentLLMInvoker = makeAgentLLMInvoker(runId, controller.signal);
 
         const executor = new AgentLoopExecutor({
           runId,
@@ -1027,19 +1090,45 @@ async function initRuntime(win: BrowserWindow) {
           toolSchemas: allToolSchemas,
           userRules,
           projectRules,
+          signal: controller.signal,  // 注入取消信号
         });
 
         try {
           const result = await executor.execute(task);
 
+          // 清理 cancelMap
+          agentCancelMap.delete(runId);
+
+          const wasCancelled = controller.signal.aborted;
+          const finalState = wasCancelled ? "CANCELLED" : "COMPLETED";
+          const completedAt = new Date().toISOString();
+          const durationMs = new Date(completedAt).getTime() - new Date(runStartedAt).getTime();
+
+          // ── 写入 DB：Run 完成 ────────────────────────────────────────────
+          try {
+            runRepo.complete(runId, {
+              state: finalState as "COMPLETED" | "CANCELLED",
+              output: { answer: result.finalAnswer.slice(0, 2000) },
+              totalTokens: result.totalTokens,
+              totalCostUsd: result.totalCostUsd,
+              durationMs,
+              completedAt,
+            });
+            console.log(`[ICEE AgentLoop DB] Run ${finalState}: ${runId}`);
+          } catch (dbErr) {
+            console.warn(`[ICEE AgentLoop DB] Failed to complete run record:`, dbErr);
+          }
+
           // 完成通知
           win.webContents.send("icee:step-event", {
             type: "SYSTEM",
-            message: `Run COMPLETED — ${result.iterations} iterations / ${result.totalTokens} tokens`,
+            message: wasCancelled
+              ? `Run CANCELLED after ${result.iterations} iterations`
+              : `Run COMPLETED — ${result.iterations} iterations / ${result.totalTokens} tokens`,
           });
           win.webContents.send("icee:run-completed", {
-            state: "COMPLETED",
-            durationMs: 0,
+            state: finalState,
+            durationMs,
             totalTokens: result.totalTokens,
             totalCostUsd: result.totalCostUsd,
             output: result.finalAnswer,
@@ -1047,14 +1136,35 @@ async function initRuntime(win: BrowserWindow) {
 
           return { runId, ok: true };
         } catch (e) {
+          // 清理 cancelMap
+          agentCancelMap.delete(runId);
+
           const msg = (e as Error).message;
+          const wasCancelled = msg === "Run cancelled" || controller.signal.aborted;
+          const completedAt = new Date().toISOString();
+          const durationMs = new Date(completedAt).getTime() - new Date(runStartedAt).getTime();
+
+          // ── 写入 DB：Run 失败 ────────────────────────────────────────────
+          try {
+            runRepo.complete(runId, {
+              state: wasCancelled ? "CANCELLED" : "FAILED",
+              totalTokens: 0,
+              totalCostUsd: 0,
+              durationMs,
+              error: { message: msg },
+              completedAt,
+            });
+          } catch (dbErr) {
+            console.warn(`[ICEE AgentLoop DB] Failed to fail run record:`, dbErr);
+          }
+
           win.webContents.send("icee:step-event", {
             type: "SYSTEM",
-            message: `❌ Run failed: ${msg}`,
+            message: wasCancelled ? `Run CANCELLED by user` : `❌ Run failed: ${msg}`,
           });
           win.webContents.send("icee:run-completed", {
-            state: "FAILED",
-            durationMs: 0,
+            state: wasCancelled ? "CANCELLED" : "FAILED",
+            durationMs,
             totalTokens: 0,
             totalCostUsd: 0,
             output: undefined,
@@ -1146,8 +1256,18 @@ async function initRuntime(win: BrowserWindow) {
     );
 
     // ── IPC: cancel-run ────────────────────────
+    // 同时支持 AgentLoop（agentCancelMap）和 GraphRuntime（runtime.cancelRun）
     ipcMain.removeHandler("icee:cancel-run");
     ipcMain.handle("icee:cancel-run", async (_event, runId: string) => {
+      // 优先取消 AgentLoop（若存在）
+      const agentController = agentCancelMap.get(runId);
+      if (agentController) {
+        agentController.abort();
+        agentCancelMap.delete(runId);
+        console.log(`[ICEE Main] AgentLoop cancelled: runId=${runId}`);
+        return { ok: true };
+      }
+      // fallback：取消 GraphRuntime run
       runtime.cancelRun(runId);
       return { ok: true };
     });

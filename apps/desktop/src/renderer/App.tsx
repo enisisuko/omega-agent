@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sidebar } from "./components/layout/Sidebar.js";
 import { NerveCenter } from "./components/nerve-center/NerveCenter.js";
@@ -147,6 +147,11 @@ export function App() {
   const [activeSessionId, setActiveSessionId] = useState<string>(
     () => sessions[0]!.id
   );
+  // useRef 版本：供 IPC 回调闭包读取最新值，避免闭包捕获旧 sessionId
+  const activeSessionIdRef = useRef<string>(sessions[0]!.id);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   // 从 sessions 数组派生当前会话数据，避免 state 冗余
   const currentSession =
@@ -162,6 +167,8 @@ export function App() {
   // ── 流式输出状态（打字机效果）────────────────────────────────
   const [streamingText, setStreamingText] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
+  // 当前活跃的 runId（用于过滤 token-stream，防止多 run 混流）
+  const activeRunIdRef = useRef<string | null>(null);
 
   // ── 真实 MCP 工具数据（Electron 下从主进程拉取；浏览器 dev fallback mockMcpTools）─────
   const [mcpToolsData, setMcpToolsData] = useState<McpToolData[]>([]);
@@ -181,9 +188,11 @@ export function App() {
   const { isElectron, runGraph, cancelRun } = useIceeRuntime({
     // 实时追加 TraceLog + 更新 subagents 状态 + 更新 executionEdges 到当前会话
     onStepEvent: useCallback((entry: TraceLogEntry) => {
+      // 使用 ref 读取最新 sessionId，避免闭包捕获旧值（session 切换时仍能正确写入）
+      const sid = activeSessionIdRef.current;
       setSessions((prev) =>
         prev.map((s) => {
-          if (s.id !== activeSessionId) return s;
+          if (s.id !== sid) return s;
 
           // ── 更新 subagents 节点状态 ──────────────────────────
           let updatedSubagents = s.subagents;
@@ -275,7 +284,8 @@ export function App() {
           };
         })
       );
-    }, [activeSessionId]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),  // 使用 activeSessionIdRef 读取，无需依赖 activeSessionId
 
     // Run 完成时更新 orchestrator 状态 + 写入 aiOutput + 推入 runHistory + 最终化 executionEdges
     onRunCompleted: useCallback((payload) => {
@@ -287,9 +297,11 @@ export function App() {
 
       const isFailed = payload.state !== "COMPLETED";
 
+      // 使用 ref 读取最新 sessionId
+      const sid = activeSessionIdRef.current;
       setSessions((prev) =>
         prev.map((s) => {
-          if (s.id !== activeSessionId) return s;
+          if (s.id !== sid) return s;
 
           // 将完成的 run 推入历史列表（使用条件展开处理可选字段）
           const historyItem: RunHistoryItem = {
@@ -345,16 +357,18 @@ export function App() {
           };
         })
       );
-    }, [activeSessionId]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),  // 使用 activeSessionIdRef 读取，无需依赖 activeSessionId
 
     // Token 实时更新（进度条用）+ 上下文压缩预警
     // 当单次 Run 累计 token 超过 TOKEN_WARN_THRESHOLD 时，
     // 自动在 TraceLog 中追加系统警告，提示用户上下文即将压缩
     onTokenUpdate: useCallback((tokens: number, costUsd: number) => {
       const TOKEN_WARN_THRESHOLD = 3000; // token 预警阈值（可按需调整）
+      const sid = activeSessionIdRef.current;
       setSessions((prev) =>
         prev.map((s) => {
-          if (s.id !== activeSessionId) return s;
+          if (s.id !== sid) return s;
           const prevTokens = s.orchestrator.totalTokens ?? 0;
           // 仅在本次更新跨越阈值时追加一次警告（避免每次更新都追加）
           const crossedThreshold =
@@ -378,7 +392,8 @@ export function App() {
           };
         })
       );
-    }, [activeSessionId]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),  // 使用 activeSessionIdRef 读取，无需依赖 activeSessionId
 
     // Ollama 状态 → 存入 state，Sidebar 读取显示呼吸灯
     onOllamaStatus: useCallback((healthy: boolean, url: string) => {
@@ -450,9 +465,11 @@ export function App() {
 
       console.log(`[ICEE AgentStep] step=${step.index} status=${step.status} nodeId=${nodeId}`);
 
+      // 使用 ref 读取最新 sessionId
+      const sid = activeSessionIdRef.current;
       setSessions((prev) =>
         prev.map((s) => {
-          if (s.id !== activeSessionId) return s;
+          if (s.id !== sid) return s;
 
           // 更新最新轮（rounds 最后一项）的 subagents
           const rounds = s.rounds ?? [];
@@ -477,15 +494,19 @@ export function App() {
           };
         })
       );
-    }, [activeSessionId]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),  // 使用 activeSessionIdRef 读取，无需依赖 activeSessionId
   });
 
   // ── 流式 token 监听（打字机效果）──────────────────────────────
   // 每次 Run 开始时清空 streamingText，逐 token 追加；Run 完成后停止
+  // 使用 activeRunIdRef 过滤 token，防止多 run 并发时 token 混流
   useEffect(() => {
     if (!isElectron || !window.icee?.onTokenStream) return;
 
-    const unsub = window.icee.onTokenStream(({ token }) => {
+    const unsub = window.icee.onTokenStream(({ token, runId }) => {
+      // 只接受当前活跃 run 的 token（过滤残留或并发 token）
+      if (runId && activeRunIdRef.current && runId !== activeRunIdRef.current) return;
       setIsStreaming(true);
       setStreamingText(prev => prev + token);
     });
@@ -494,9 +515,10 @@ export function App() {
 
   // Run 完成时停止 streaming 状态（onRunCompleted 已处理 aiOutput，streaming 状态重置）
   useEffect(() => {
-    if (currentSession.state === "completed" || currentSession.state === "failed") {
+    if (currentSession.state === "completed" || currentSession.state === "failed" || currentSession.state === "cancelled") {
       setIsStreaming(false);
       setStreamingText(""); // 清空 streaming buffer（最终内容已在 session.aiOutput）
+      activeRunIdRef.current = null;
     }
   }, [currentSession.state]);
 
@@ -641,6 +663,12 @@ export function App() {
       const titleBase = task.trim() || (attachments.length > 0 ? `[${attachments.length} attachment(s)]` : "New task");
       const shortTitle = titleBase.length > 40 ? titleBase.slice(0, 40) + "…" : titleBase;
       const tempRunId = genId();
+
+      // 新任务开始前：清空流式文本，注册活跃 runId
+      // 防止新任务的 token 接在旧任务残留文本后面
+      setStreamingText("");
+      setIsStreaming(false);
+      activeRunIdRef.current = tempRunId;
 
       // AgentLoop 不需要 graphJson，只需要空 edges 占位
       const initialEdges: ExecutionEdge[] = [];

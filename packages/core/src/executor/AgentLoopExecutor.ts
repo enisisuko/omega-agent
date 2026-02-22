@@ -409,10 +409,29 @@ function parseAgentResponse(text: string): {
     let toolInput: unknown = inputBlock;
 
     // 尝试解析各个参数标签
+    // ⚠️ 关键：不能用全局非贪婪正则 <(\w+)>([\s\S]*?)<\/\1>
+    //   因为当参数值本身含有 XML 标签（如写代码时 content 里有 <div>）时，
+    //   非贪婪匹配会在 </div> 处截断，导致参数值残缺
+    //
+    // 修复方案：先提取所有参数名，再逐参数名查找「第一个开始标签」到「最后一个结束标签」之间的内容
     const paramMap: Record<string, string> = {};
-    const paramMatches = inputBlock.matchAll(/<(\w+)>([\s\S]*?)<\/\1>/g);
-    for (const m of paramMatches) {
-      paramMap[m[1]!] = m[2]?.trim() ?? "";
+    // 第一步：找出所有出现的参数名（开始标签）
+    const tagNameRegex = /<(\w+)>/g;
+    const tagNames = new Set<string>();
+    for (const m of inputBlock.matchAll(tagNameRegex)) {
+      if (m[1] && m[1].toLowerCase() !== "tool_name") {
+        tagNames.add(m[1]);
+      }
+    }
+    // 第二步：逐参数名，找第一个 <name> 到最后一个 </name> 之间的内容（贪婪）
+    for (const name of tagNames) {
+      const openTag = `<${name}>`;
+      const closeTag = `</${name}>`;
+      const start = inputBlock.indexOf(openTag);
+      const end = inputBlock.lastIndexOf(closeTag);
+      if (start !== -1 && end !== -1 && end > start) {
+        paramMap[name] = inputBlock.slice(start + openTag.length, end).trim();
+      }
     }
     if (Object.keys(paramMap).length > 0) {
       toolInput = paramMap;
@@ -468,6 +487,7 @@ export class AgentLoopExecutor {
   private toolSchemas: ToolSchemaInfo[];
   private userRules?: string;
   private projectRules?: string;
+  private signal?: AbortSignal;  // 取消信号（由外部 AbortController 注入）
 
   constructor(opts: {
     runId: string;
@@ -479,6 +499,7 @@ export class AgentLoopExecutor {
     toolSchemas?: ToolSchemaInfo[];
     userRules?: string;
     projectRules?: string;
+    signal?: AbortSignal;  // 可选的取消信号
   }) {
     this.runId = opts.runId;
     this.config = opts.config;
@@ -489,6 +510,7 @@ export class AgentLoopExecutor {
     this.toolSchemas = opts.toolSchemas ?? [];
     if (opts.userRules !== undefined) this.userRules = opts.userRules;
     if (opts.projectRules !== undefined) this.projectRules = opts.projectRules;
+    if (opts.signal !== undefined) this.signal = opts.signal;
   }
 
   async execute(task: string): Promise<AgentLoopResult> {
@@ -517,6 +539,13 @@ export class AgentLoopExecutor {
     log.info({ runId, task: task.slice(0, 80), maxIterations: config.maxIterations }, "AgentLoop started");
 
     while (continueLoop && iteration < config.maxIterations) {
+      // ── 取消检查：每轮循环开始时检查 AbortSignal ──────────────────────
+      if (this.signal?.aborted) {
+        log.info({ runId, iteration }, "AgentLoop cancelled by AbortSignal");
+        finalAnswer = this.lang === "zh" ? "任务已被用户取消。" : "Task cancelled by user.";
+        break;
+      }
+
       iteration++;
       log.debug({ runId, iteration }, "AgentLoop iteration start");
 
@@ -563,6 +592,14 @@ export class AgentLoopExecutor {
             messages.length = 0;
             messages.push(...compressed.messages);
           }
+        }
+
+        // ── 取消检查：LLM 调用前再次检查（避免压缩后仍调用）──────────
+        if (this.signal?.aborted) {
+          log.info({ runId, iteration }, "AgentLoop cancelled before LLM call");
+          finalAnswer = this.lang === "zh" ? "任务已被用户取消。" : "Task cancelled by user.";
+          continueLoop = false;
+          break;
         }
 
         // ── RetryWithBackoff: 带退避的 LLM 调用 ────────────────────────
