@@ -59,6 +59,20 @@ const NODE_ID_LABEL_MAP: Record<string, string> = {
   chat:      "AI Response",
 };
 
+/**
+ * 节点 ID → 任务概览说明（一句话描述节点职责）
+ * 在节点开始执行前显示，帮助用户了解当前步骤意图
+ */
+const NODE_ID_PREVIEW_MAP: Record<string, string> = {
+  input:     "接收并传递用户的原始输入",
+  plan:      "将任务分解为 3 个清晰可执行的步骤",
+  decompose: "提取关键技术要点与实现约束条件",
+  execute:   "根据计划生成完整可交付的内容",
+  reflect:   "审查执行结果，整合优化后输出最终版本",
+  output:    "汇总并输出最终结果",
+  chat:      "调用 LLM 生成回复",
+};
+
 /** 创建空白 idle 会话（New Chat 时使用） */
 function createBlankSession(): ConversationSession {
   return {
@@ -177,16 +191,22 @@ export function App() {
             const isStart = entry.message.includes("start") || entry.type === "AGENT_ACT";
             const isError = entry.message.toLowerCase().includes("error") || entry.message.toLowerCase().includes("failed");
 
-            // 查表获取节点类型（颜色标识）和友好标签
+            // 查表获取节点类型（颜色标识）、友好标签、任务概览
             const nodeType = NODE_ID_TYPE_MAP[nodeId] ?? "LLM";
             const nodeLabel = NODE_ID_LABEL_MAP[nodeId]
               ?? (nodeId.charAt(0).toUpperCase() + nodeId.slice(1));
+            const nodePreview = NODE_ID_PREVIEW_MAP[nodeId];
+
+            // 保留已有的 taskPreview（节点第一次出现时写入，后续更新时不覆盖）
+            const existingNode = updatedSubagents.find((n) => n.id === nodeId);
+            const taskPreview = existingNode?.taskPreview ?? nodePreview;
 
             const newNode: SubagentNode = {
               id: nodeId,
               label: nodeLabel,
               type: nodeType,
               pipeConnected: true,
+              taskPreview,
               state: isError
                 ? { status: "error", errorMsg: entry.message }
                 : isStart

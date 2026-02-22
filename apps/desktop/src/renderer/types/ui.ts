@@ -55,6 +55,11 @@ export interface SubagentNode {
   /** 绑定到 Orchestrator 的连线数据 */
   pipeConnected: boolean;
   /**
+   * 节点开始前显示的任务概览说明（一句话描述该节点要做什么）
+   * 在 idle / running 初始阶段显示，帮助用户理解当前步骤的意图
+   */
+  taskPreview?: string;
+  /**
    * 该节点的执行步骤历史（按时间顺序，最新在末尾）
    * 点击展开节点时显示；支持单步撤回和重新生成
    */
