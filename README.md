@@ -2,7 +2,7 @@
 
 # Ω Omega Agent · v2.0.0
 
-**Local-first AI agent desktop. See every step. Own every step.**
+**Run AI agents locally. No API key. No cloud. No data leaving your machine.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-brightgreen)](https://nodejs.org/)
@@ -18,17 +18,18 @@
 
 ---
 
-Most AI agent tools are black boxes. You submit a task, wait, and when something goes wrong — you start from scratch.
+Omega is built to run on **your machine**, with **your models**. Ollama and LM Studio are first-class citizens — detected automatically on launch, no configuration needed. Everything works offline, including web search (DuckDuckGo, no key).
 
-Omega works differently. Every step the agent takes is visible. You can pause at any point, edit the prompt, and re-run from there. No waiting, no guessing.
+If you want to use a cloud provider, you can — but you never have to.
 
 | | Other agents | Omega |
 |---|:---:|:---:|
+| Runs on local models (Ollama, LM Studio) | Maybe | **Yes, by default** |
+| Works fully offline | Maybe | **Always** |
+| Requires an API key | Required | **Never required** |
 | See every step live | ✗ | ✓ |
 | Edit prompt mid-run | ✗ | ✓ |
 | Fork from any step | ✗ | ✓ |
-| Works fully offline | Maybe | **Always** |
-| Requires an API key | Required | **Optional** |
 
 ---
 
@@ -60,34 +61,35 @@ Omega works differently. Every step the agent takes is visible. You can pause at
 
 ## Core features
 
+### Local-first — works out of the box with Ollama
+
+Omega launches and immediately scans for local model servers. If Ollama or LM Studio is running, it shows up automatically. Pick a model, start chatting — no account, no key, no billing.
+
+```bash
+# Install Ollama, then pull any model
+ollama pull qwen2.5:7b      # recommended for Chinese tasks
+ollama pull llama3.2        # fast, good general-purpose
+ollama pull deepseek-r1:8b  # stronger reasoning
+```
+
+Every feature — streaming output, tool calls, multi-turn memory, context compression — works identically on local and cloud models. Switching providers is one config change.
+
+| Provider | Type | Notes |
+|----------|------|-------|
+| **Ollama** | Local | Default — zero setup, full privacy |
+| **LM Studio** | Local | Auto-detected, OpenAI-compatible |
+| **OpenAI** | Cloud | GPT-4o, o1, etc. |
+| **Groq** | Cloud | Fast inference, generous free tier |
+| **Azure OpenAI** | Cloud | Enterprise |
+| Any OpenAI-compatible API | Either | One URL field to configure |
+
 ### Step-level rewind & re-execution
 
 Every node stores its exact input, output, token count, and duration. At any point you can revert a step or branch the entire workflow forward from that node — with an edited prompt if you want.
 
 Each fork gets a new `runId` in SQLite. The full execution lineage is always preserved.
 
-### Local-first, runs completely offline
-
-Built around Ollama by default. No API key, no data leaving your machine.
-
-```bash
-ollama pull qwen2.5:7b      # good for Chinese tasks
-ollama pull llama3.2        # fast general-purpose
-ollama pull deepseek-r1:8b  # stronger reasoning
-```
-
-Cloud providers (OpenAI, Groq, Azure, any OpenAI-compatible endpoint) work the same way — just a different config entry.
-
-| Provider | Type | Notes |
-|----------|------|-------|
-| **Ollama** | Local | Default — no key, full privacy |
-| **LM Studio** | Local | OpenAI-compatible local server |
-| **OpenAI** | Cloud | GPT-4o, o1, etc. |
-| **Groq** | Cloud | Fast inference, generous free tier |
-| **Azure OpenAI** | Cloud | Enterprise |
-| Any OpenAI-compatible API | Either | One URL field |
-
-### 8 built-in tools — no setup needed
+### 8 built-in tools — all work offline, no setup needed
 
 | Tool | What it does |
 |------|-------------|
@@ -113,29 +115,38 @@ Connect any [Model Context Protocol](https://modelcontextprotocol.io/) server. B
 
 ## Quick start
 
-### Download (recommended)
+### Step 1 — Get a local model running
 
-Grab the latest installer from [Releases](https://github.com/enisisuko/ICee-agent/releases):
+Install [Ollama](https://ollama.com/) and pull a model:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+That's it for the model side. Omega will find it automatically.
+
+### Step 2 — Install Omega
+
+Grab the latest installer from [Releases](https://github.com/enisisuko/omega-agent/releases):
 - **Windows**: `Omega Agent Setup 2.0.0.exe`
 - **macOS**: `omega-agent-2.0.0.dmg`
 
-Install [Ollama](https://ollama.com/), pull a model, launch Omega.
+Launch Omega → it detects Ollama → select a model → start.
 
 ### Build from source
 
 Requires [Node.js](https://nodejs.org/) ≥ 20, [pnpm](https://pnpm.io/) ≥ 9, [Ollama](https://ollama.com/)
 
 ```bash
-git clone https://github.com/enisisuko/ICee-agent.git
-cd ICee-agent
-pnpm install
-pnpm desktop
-```
-
-```bash
-# separate terminal
+# Terminal 1 — start Ollama
 ollama serve
 ollama pull qwen2.5:7b
+
+# Terminal 2 — start Omega
+git clone https://github.com/enisisuko/omega-agent.git
+cd omega-agent
+pnpm install
+pnpm desktop
 ```
 
 ---
