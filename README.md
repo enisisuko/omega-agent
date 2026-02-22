@@ -1,222 +1,201 @@
-﻿<div align="center">
+<div align="center">
 
-<img src="https://raw.githubusercontent.com/enisisuko/omega-agent/main/screenshots/Omega-ui-demo.png" alt="Omega Agent" width="100%">
-
-# Omega Agent · v1.0.3
+# Ω Omega Agent · v2.0.0
 
 **Local-first AI agent desktop. See every step. Own every step.**
 
-A desktop app that makes AI agents transparent and controllable — watch every decision live, rewind to any step, edit the prompt, and branch from there.
-
-[![CI](https://github.com/enisisuko/omega-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/enisisuko/omega-agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-brightgreen)](https://nodejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-35-blueviolet)](https://www.electronjs.org/)
 [![Ollama](https://img.shields.io/badge/Ollama-ready-black)](https://ollama.com/)
 [![MCP](https://img.shields.io/badge/MCP-supported-orange)](https://modelcontextprotocol.io/)
 
-[中文文档](README.zh.md) · [Report Bug](https://github.com/enisisuko/omega-agent/issues) · [Request Feature](https://github.com/enisisuko/omega-agent/issues)
+[中文文档](README.zh.md) · [Report Bug](https://github.com/enisisuko/ICee-agent/issues) · [Request Feature](https://github.com/enisisuko/ICee-agent/issues)
+
+<img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-welcome.png" alt="Omega Agent Welcome Screen" width="60%">
 
 </div>
 
 ---
 
-## Why Omega?
+Most AI agent tools are black boxes. You submit a task, wait, and when something goes wrong — you start from scratch.
 
-Most AI agent tools are black boxes. You submit a task, wait, hope the result is right — and when it isn't, you start over from scratch.
+Omega works differently. Every step the agent takes is visible. You can pause at any point, edit the prompt, and re-run from there. No waiting, no guessing.
 
-Omega is built differently:
-
-| | Other agents | Omega Agent |
+| | Other agents | Omega |
 |---|:---:|:---:|
 | See every step live | ✗ | ✓ |
-| Edit a prompt mid-run | ✗ | ✓ |
-| Fork the workflow from any step | ✗ | ✓ |
-| Works completely offline | Maybe | **Always** |
+| Edit prompt mid-run | ✗ | ✓ |
+| Fork from any step | ✗ | ✓ |
+| Works fully offline | Maybe | **Always** |
 | Requires an API key | Required | **Optional** |
 
 ---
 
-## ✨ What makes Omega different
+## What it looks like
 
-### 1. Step-level rewind & re-execution
+**Agent running — watch each tool call happen in real time:**
 
-<img src="https://raw.githubusercontent.com/enisisuko/omega-agent/main/screenshots/Omega-step-detail.png" alt="Step detail with revert and rerun controls" width="100%">
+<img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-agent-running.png" alt="Agent running" width="100%">
 
-Every node records its full execution history: the exact prompt sent, the output received, token count, duration, and whether it succeeded or retried. At any point you can:
+**Rerun from any node — edit the prompt, branch forward:**
 
-- **Revert this step** — roll back to a previous attempt within the same node
-- **Rerun from here** — branch the entire workflow forward from this node
+<img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-rerun-modal.png" alt="Rerun modal" width="100%">
 
-<img src="https://raw.githubusercontent.com/enisisuko/omega-agent/main/screenshots/Omega-rerun-modal.png" alt="Rerun modal — edit the prompt before re-executing" width="100%">
+**Agent finished — full output with reflection:**
 
-The rerun modal shows the previous input and output side by side for context — then lets you edit the exact prompt before re-executing. Change one word or rewrite the whole thing. Downstream nodes are cleared and re-run from the branch point.
+<img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-agent-done.png" alt="Agent done" width="100%">
 
-> **Under the hood**: each fork generates a new `runId` in SQLite with `parent_run_id` and `fork_from_step_id` fields. The complete execution lineage is preserved — you can always trace how you got to any result.
+**Provider setup — auto-detects Ollama and LM Studio:**
 
-<img src="https://raw.githubusercontent.com/enisisuko/omega-agent/main/screenshots/Omega-node-graph.png" alt="Node graph showing step states" width="100%">
-
-Node states update live: `running` → `done` (green) / `error` (red) → `Step reverted by user` → rerunning. The graph always reflects exactly where the agent is.
+<table>
+<tr>
+<td><img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-providers-cn.png" alt="Providers CN" width="100%"></td>
+<td><img src="https://raw.githubusercontent.com/enisisuko/ICee-agent/main/screenshots/omega-providers-en.png" alt="Providers EN" width="100%"></td>
+</tr>
+<tr><td align="center">中文界面</td><td align="center">English UI</td></tr>
+</table>
 
 ---
 
-### 2. Local-model first — no cloud required
+## Core features
 
-Omega is built from the ground up to run with **local LLMs via Ollama**. No API key, no data leaving your machine, no per-token billing.
+### Step-level rewind & re-execution
 
-> **Completely offline**: Ollama handles the LLM, DuckDuckGo powers web search (no key), and 8 built-in tools cover filesystem, clipboard, and code execution. Every feature works with zero external accounts.
+Every node stores its exact input, output, token count, and duration. At any point you can revert a step or branch the entire workflow forward from that node — with an edited prompt if you want.
+
+Each fork gets a new `runId` in SQLite. The full execution lineage is always preserved.
+
+### Local-first, runs completely offline
+
+Built around Ollama by default. No API key, no data leaving your machine.
 
 ```bash
-ollama pull qwen2.5:7b      # recommended for Chinese tasks
+ollama pull qwen2.5:7b      # good for Chinese tasks
 ollama pull llama3.2        # fast general-purpose
-ollama pull deepseek-r1:8b  # strong reasoning
+ollama pull deepseek-r1:8b  # stronger reasoning
 ```
 
-Every feature — streaming output, tool calls, multi-turn memory, context compression — works identically whether you're using a local model or a cloud provider. The provider is a single config entry; the rest of the system doesn't change.
+Cloud providers (OpenAI, Groq, Azure, any OpenAI-compatible endpoint) work the same way — just a different config entry.
 
 | Provider | Type | Notes |
 |----------|------|-------|
-| **Ollama** | Local | Default — no key, no cost, full privacy |
+| **Ollama** | Local | Default — no key, full privacy |
 | **LM Studio** | Local | OpenAI-compatible local server |
 | **OpenAI** | Cloud | GPT-4o, o1, etc. |
 | **Groq** | Cloud | Fast inference, generous free tier |
-| **Azure OpenAI** | Cloud | Enterprise deployments |
-| Any OpenAI-compatible API | Either | One URL field to configure |
+| **Azure OpenAI** | Cloud | Enterprise |
+| Any OpenAI-compatible API | Either | One URL field |
 
----
-
-## What the agent can do
-
-Omega runs a **ReAct loop** (Reason → Act → Observe, up to 20 iterations). The agent autonomously decides which tools to call and when to stop. If it's not making progress, a nudge prompts it to reformat; at the iteration limit, it writes a forced summary at lower temperature.
-
-### 8 built-in tools — zero setup
-
-All tools run directly in the Electron process. No external server, no configuration.
+### 8 built-in tools — no setup needed
 
 | Tool | What it does |
 |------|-------------|
-| `web_search` | DuckDuckGo search — no API key |
-| `http_fetch` | Fetch any URL, strips scripts and HTML tags |
-| `fs_read` | Read files or list directory contents |
-| `fs_write` | Write files, creates directories as needed |
-| `code_exec` | Run JS / Python / Bash (PowerShell on Windows) inline |
+| `web_search` | DuckDuckGo — no API key |
+| `http_fetch` | Fetch URL, strips HTML |
+| `fs_read` | Read files or list directories |
+| `fs_write` | Write files, auto-creates directories |
+| `code_exec` | Run JS / Python / Bash inline |
 | `clipboard_read` | Read system clipboard |
-| `clipboard_write` | Write to system clipboard |
-| `browser_open` | Open any URL in the default browser |
+| `clipboard_write` | Write to clipboard |
+| `browser_open` | Open URL in default browser |
 
-### MCP tool server support
+### MCP tool servers
 
-Connect any [Model Context Protocol](https://modelcontextprotocol.io/) server for additional tools. Built-in tools take priority when names conflict.
+Connect any [Model Context Protocol](https://modelcontextprotocol.io/) server. Built-in tools take priority on name conflicts.
 
 ### Rules system
 
-Shape agent behavior with a two-layer rules system:
-- **Global rules** — stored in SQLite, injected into every session's system prompt
-- **Project rules** — place `.Omega/rules.md` in any directory; auto-loaded when working there
-
-### Agent skills
-
-| Skill | What it does |
-|-------|-------------|
-| `ContextCompressor` | Auto-compresses history at 80% token budget — preserves task definition and recent context |
-| `RetryWithBackoff` | Exponential backoff retry on LLM failure (2 attempts, up to 10s delay) |
-| `OutputFormatter` | Normalizes code blocks, fixes spacing in the final output |
+- **Global rules** — stored in SQLite, injected into every session
+- **Project rules** — place `.Omega/rules.md` in any directory, auto-loaded when working there
 
 ---
 
-## 🚀 Quick Start
+## Quick start
 
-### Option A — Download the installer
+### Download (recommended)
 
-Download the latest release for your platform from [Releases](https://github.com/enisisuko/omega-agent/releases):
-- **Windows**: `Omega Agent Setup 1.0.3.exe` (NSIS installer)
-- **macOS**: `omega-agent-1.0.3.dmg`
+Grab the latest installer from [Releases](https://github.com/enisisuko/ICee-agent/releases):
+- **Windows**: `Omega Agent Setup 2.0.0.exe`
+- **macOS**: `omega-agent-2.0.0.dmg`
 
-Then install [Ollama](https://ollama.com/), pull a model, and launch Omega.
+Install [Ollama](https://ollama.com/), pull a model, launch Omega.
 
-### Option B — Run from source
+### Build from source
 
-**Requirements**: [Node.js](https://nodejs.org/) ≥ 20, [pnpm](https://pnpm.io/) ≥ 9, [Ollama](https://ollama.com/)
+Requires [Node.js](https://nodejs.org/) ≥ 20, [pnpm](https://pnpm.io/) ≥ 9, [Ollama](https://ollama.com/)
 
 ```bash
-git clone https://github.com/enisisuko/omega-agent.git
-cd omega-agent
+git clone https://github.com/enisisuko/ICee-agent.git
+cd ICee-agent
 pnpm install
 pnpm desktop
 ```
 
 ```bash
-# In a separate terminal, start Ollama and pull a model
+# separate terminal
 ollama serve
 ollama pull qwen2.5:7b
 ```
 
-Open the app → Settings → add your provider → type a task → watch it run.
-
 ---
 
-## 🗂️ Project Structure
+## Project structure
 
 pnpm monorepo, powered by Turborepo:
 
 ```
-omega-agent/
+ICee-agent/
 ├── apps/
-│   └── desktop/           # Electron app (main + renderer)
+│   └── desktop/           # Electron app
 │       └── src/
-│           ├── main/      # IPC handlers, MCP client, built-in tools, SQLite
+│           ├── main/      # IPC, MCP client, built-in tools, SQLite
 │           └── renderer/  # React UI — NerveCenter, Sidebar, Settings
 ├── packages/
-│   ├── core/              # Agent engine: ReAct loop, GraphRuntime, executors, skills
+│   ├── core/              # ReAct loop, GraphRuntime, node executors
 │   ├── providers/         # LLM adapters: Ollama, OpenAI-compatible
-│   ├── shared/            # Zod schemas, shared TypeScript types
-│   └── db/                # SQLite layer (8 tables, auto-migration)
-└── demo/
-    ├── ollama-chat/       # Minimal 3-node chat pipeline
-    └── search-summarize/  # 4-node search + summarize example
+│   ├── shared/            # Zod schemas, shared types
+│   └── db/                # SQLite layer, 8 tables, auto-migration
 ```
 
----
-
-## 🛠️ Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |-------|------------|
 | Desktop shell | Electron 35 |
-| UI framework | React 18 + Framer Motion 11 + Tailwind CSS 3 |
-| Agent engine | Custom ReAct loop · GraphRuntime (run / forkRun / cancelRun) |
-| Persistence | SQLite via better-sqlite3 · 8 tables · auto-migration |
-| Build tooling | Vite 5 · pnpm workspaces · Turborepo |
+| UI | React 18 + Framer Motion + Tailwind CSS |
+| Agent engine | ReAct loop · GraphRuntime (run / forkRun / cancelRun) |
+| Persistence | SQLite via better-sqlite3 · auto-migration |
+| Build | Vite 5 · pnpm workspaces · Turborepo |
 | Packaging | electron-builder · NSIS (Windows) · DMG (macOS) |
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [x] ReAct agent loop with token streaming
 - [x] Live node visualization (NerveCenter)
 - [x] Step-level revert & rerun with prompt editing
-- [x] Fork-based execution with DB-level lineage tracking
-- [x] 8 built-in tools — no API key required
+- [x] Fork execution with DB-level lineage tracking
+- [x] 8 built-in tools
 - [x] Ollama / local-model first
-- [x] Multi-provider support (cloud + local)
+- [x] Multi-provider support
 - [x] Rules system (global + per-project)
 - [x] MCP tool server integration
-- [x] Multi-turn conversation
-- [x] Packaged installer — v1.0.3 (Windows NSIS + macOS DMG)
-- [x] Plugin system (architecture in place)
-- [ ] Sub-agent marketplace presets
-- [ ] Web version (browser-based)
-- [ ] Visual graph editor for workflow design
+- [x] i18n (Chinese + English)
+- [x] Packaged installer — v2.0.0 (Windows + macOS)
+- [ ] Visual graph editor
+- [ ] Web version
+- [ ] Plugin marketplace
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, how to add a Provider, a node executor, or a built-in tool.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and how to add a provider, node executor, or built-in tool.
 
 ---
 
-## 📄 License
+## License
 
 [MIT](LICENSE) © 2026 Omega Agent Contributors
